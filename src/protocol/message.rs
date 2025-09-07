@@ -140,6 +140,50 @@ impl Message {
     fn checksum(&self) -> u32 {
         super::checksum::calculate(&self.data)
     }
+
+    /// Generate debug-friendly formatted string
+    pub fn debug_format(&self) -> String {
+        format!(
+            "Message {{ cmd: {:?} (0x{:08X}), arg0: 0x{:08X}, arg1: 0x{:08X}, data_len: {} }}",
+            self.command,
+            self.command.to_u32(),
+            self.arg0,
+            self.arg1,
+            self.data.len()
+        )
+    }
+
+    /// Generate detailed debug information including raw bytes
+    pub fn debug_raw(&self) -> String {
+        use crate::utils::hex_dump::hex_dump_string;
+        
+        let raw = self.serialize();
+        let mut output = self.debug_format();
+        
+        output.push_str("\nHeader (24 bytes):\n");
+        output.push_str(&hex_dump_string("Header", &raw[..24], Some(24)));
+        
+        if !self.data.is_empty() {
+            output.push_str("\nData payload:\n");
+            output.push_str(&hex_dump_string("Payload", &self.data, Some(256)));
+        }
+        
+        output
+    }
+
+    /// Get compact representation for logging
+    pub fn debug_compact(&self) -> String {
+        use crate::utils::hex_dump::format_bytes_inline;
+        
+        let raw = self.serialize();
+        format!(
+            "{:?}(0x{:08X}) [{} bytes] {}",
+            self.command,
+            self.command.to_u32(),
+            raw.len(),
+            format_bytes_inline(&raw, Some(32))
+        )
+    }
 }
 
 #[cfg(test)]

@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::sync::Arc;
 use tokio::sync::{RwLock, watch};
 use tokio::task::JoinHandle;
 use tracing::{info, warn, debug, error};
@@ -7,6 +6,7 @@ use anyhow::Result;
 
 use crate::protocol::message::Message;
 use super::{Transport, MonitorableTransport, TransportType, ConnectionStatus};
+use super::debug::{DebugTransport, is_debug_env_enabled};
 
 /// Unified manager for all transport types
 pub struct TransportManager {
@@ -40,6 +40,32 @@ impl TransportManager {
         Ok(device_id)
     }
 
+    /// Add a transport with optional debug wrapping
+    pub async fn add_transport_with_debug(&self, transport: Box<dyn Transport + Send>, enable_debug: bool) -> Result<String> {
+        if enable_debug {
+            let debug_transport = DebugTransport::with_debug(transport, true);
+            self.add_transport(Box::new(debug_transport)).await
+        } else {
+            self.add_transport(transport).await
+        }
+    }
+
+    /// Add transport with debug automatically enabled based on environment
+    #[inline]
+    pub async fn add_transport_auto_debug(&self, transport: Box<dyn Transport + Send>) -> Result<String> {
+        #[cfg(feature = "transport-debug")]
+        {
+            let debug_enabled = is_debug_env_enabled();
+            self.add_transport_with_debug(transport, debug_enabled).await
+        }
+        
+        #[cfg(not(feature = "transport-debug"))]
+        {
+            // When debug feature is disabled, just add transport directly
+            self.add_transport(transport).await
+        }
+    }
+
     /// Add a monitorable transport with status monitoring
     pub async fn add_monitorable_transport(&self, mut transport: Box<dyn MonitorableTransport + Send>) -> Result<String> {
         let device_id = transport.device_id().to_string();
@@ -66,6 +92,34 @@ impl TransportManager {
         
         info!("Added monitored {} transport: {}", transport_type, device_id);
         Ok(device_id)
+    }
+
+    /// Add a monitorable transport with optional debug wrapping
+    pub async fn add_monitorable_transport_with_debug(&self, transport: Box<dyn MonitorableTransport + Send>, enable_debug: bool) -> Result<String> {
+        if enable_debug {
+            // For now, monitorable transports don't support debug wrapping in the simplified version
+            // Just add the transport directly
+            warn!("Debug wrapping for MonitorableTransport not implemented in simplified version");
+            self.add_monitorable_transport(transport).await
+        } else {
+            self.add_monitorable_transport(transport).await
+        }
+    }
+
+    /// Add monitorable transport with debug automatically enabled based on environment
+    #[inline]
+    pub async fn add_monitorable_transport_auto_debug(&self, transport: Box<dyn MonitorableTransport + Send>) -> Result<String> {
+        #[cfg(feature = "transport-debug")]
+        {
+            let debug_enabled = is_debug_env_enabled();
+            self.add_monitorable_transport_with_debug(transport, debug_enabled).await
+        }
+        
+        #[cfg(not(feature = "transport-debug"))]
+        {
+            // When debug feature is disabled, just add monitorable transport directly
+            self.add_monitorable_transport(transport).await
+        }
     }
 
     /// Remove a transport

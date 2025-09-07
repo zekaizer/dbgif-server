@@ -3,6 +3,11 @@ name = "dbgif-server"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+transport-debug = []
+full-debug = ["transport-debug"]
+
 [dependencies]
 bytes = "1.5"
 crc32fast = "1.3"
