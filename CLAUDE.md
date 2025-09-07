@@ -64,6 +64,17 @@ ADB (Android Debug Bridge) Protocol을 Base로 하는 DBGIF(Debug Interface) 서
 - USB 트랜잭션 처리
 - 헤더와 데이터 분리 전송
 
+##### USB Transport Types
+1. **기본 USB Transport**
+   - Bulk IN/OUT 엔드포인트 사용
+   - 표준 ADB USB 통신
+
+2. **USB Host-to-Host Bridge Cable Transport**
+   - USB Host-to-Host Bridge Cable을 통한 직접 연결
+   - Bulk IN/OUT 엔드포인트 + Interrupt IN 엔드포인트 사용
+   - Interrupt IN을 통해 상대편 연결 상태 모니터링
+   - 연결 상태 변화 감지 및 실시간 알림
+
 ### 4. Service Handlers (`src/services/`)
 
 #### shell.rs
