@@ -1,10 +1,13 @@
+use std::sync::Arc;
 use tracing::{info, debug, error};
 use bytes::Bytes;
 use anyhow::Result;
 
 use crate::protocol::{Message, Command, VERSION};
 use crate::protocol::stream::StreamManager;
-use crate::transport::Transport;
+use crate::protocol::host_commands::HostCommand;
+use crate::services::HostService;
+use crate::transport::{Transport, TransportManager};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ClientState {
@@ -18,15 +21,19 @@ pub struct ClientHandler {
     transport: Box<dyn Transport + Send>,
     state: ClientState,
     stream_manager: StreamManager,
+    host_service: HostService,
+    target_device_id: Option<String>,
 }
 
 impl ClientHandler {
-    pub fn new(client_id: u32, transport: Box<dyn Transport + Send>) -> Self {
+    pub fn new(client_id: u32, transport: Box<dyn Transport + Send>, transport_manager: Arc<TransportManager>) -> Self {
         Self {
             client_id,
             transport,
             state: ClientState::Connecting,
             stream_manager: StreamManager::new(),
+            host_service: HostService::new(transport_manager),
+            target_device_id: None,
         }
     }
 
@@ -122,13 +129,19 @@ impl ClientHandler {
         // Extract service name from data
         let service_name = String::from_utf8_lossy(&message.data).to_string();
         
+        debug!("Client {} opened stream {} for service: {}", 
+               self.client_id, local_id, service_name);
+        
+        // Check if this is a host command
+        if let Ok(host_command) = HostCommand::parse(&service_name) {
+            return self.handle_host_command(local_id, remote_id, host_command).await;
+        }
+        
+        // Regular service handling
         if let Some(stream) = self.stream_manager.get_stream_mut(local_id) {
             stream.set_service(service_name.clone());
             stream.open();
         }
-        
-        debug!("Client {} opened stream {} for service: {}", 
-               self.client_id, local_id, service_name);
         
         // Send OKAY response
         let response = Message::new(
@@ -139,6 +152,97 @@ impl ClientHandler {
         );
         
         self.send_message(response).await?;
+        Ok(())
+    }
+
+    async fn handle_host_command(&mut self, local_id: u32, remote_id: u32, command: HostCommand) -> Result<()> {
+        use crate::services::host_service::HostServiceResponse;
+
+        debug!("Client {} executing host command: {:?}", self.client_id, command);
+        
+        match self.host_service.execute_command(command).await {
+            Ok(response) => {
+                match response {
+                    HostServiceResponse::SingleResponse(data) => {
+                        // Send OKAY first
+                        let okay_msg = Message::new(
+                            Command::Okay,
+                            local_id,
+                            remote_id,
+                            Bytes::new()
+                        );
+                        self.send_message(okay_msg).await?;
+                        
+                        // Send data if not empty
+                        if !data.is_empty() {
+                            let data_msg = Message::new(
+                                Command::Write,
+                                local_id,
+                                remote_id,
+                                data
+                            );
+                            self.send_message(data_msg).await?;
+                        }
+                        
+                        // Close stream
+                        let close_msg = Message::new(
+                            Command::Close,
+                            local_id,
+                            remote_id,
+                            Bytes::new()
+                        );
+                        self.send_message(close_msg).await?;
+                    }
+                    HostServiceResponse::TransportSelected(device_id) => {
+                        // Set target device for subsequent commands
+                        self.target_device_id = Some(device_id);
+                        
+                        // Send OKAY to confirm transport selection
+                        let okay_msg = Message::new(
+                            Command::Okay,
+                            local_id,
+                            remote_id,
+                            Bytes::new()
+                        );
+                        self.send_message(okay_msg).await?;
+                    }
+                    HostServiceResponse::StreamingResponse(_rx) => {
+                        // TODO: Implement streaming for track-devices
+                        // For now, just send OKAY
+                        let okay_msg = Message::new(
+                            Command::Okay,
+                            local_id,
+                            remote_id,
+                            Bytes::new()
+                        );
+                        self.send_message(okay_msg).await?;
+                    }
+                }
+            }
+            Err(e) => {
+                error!("Host command failed for client {}: {}", self.client_id, e);
+                
+                // Send error response
+                let error_data = format!("FAIL{:04x}{}", e.to_string().len(), e);
+                let fail_msg = Message::new(
+                    Command::Write,
+                    local_id,
+                    remote_id,
+                    Bytes::from(error_data)
+                );
+                self.send_message(fail_msg).await?;
+                
+                // Close stream
+                let close_msg = Message::new(
+                    Command::Close,
+                    local_id,
+                    remote_id,
+                    Bytes::new()
+                );
+                self.send_message(close_msg).await?;
+            }
+        }
+        
         Ok(())
     }
 

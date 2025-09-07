@@ -7,11 +7,12 @@ use anyhow::Result;
 use crate::protocol::constants::DEFAULT_PORT;
 use super::client_handler::ClientHandler;
 use crate::transport::tcp::TcpTransport;
-use crate::transport::Transport;
+use crate::transport::{Transport, TransportManager};
 
 pub struct DbgifServer {
     listener: Option<TcpListener>,
     client_counter: Arc<RwLock<u32>>,
+    transport_manager: Arc<TransportManager>,
 }
 
 impl DbgifServer {
@@ -19,7 +20,13 @@ impl DbgifServer {
         Self {
             listener: None,
             client_counter: Arc::new(RwLock::new(0)),
+            transport_manager: Arc::new(TransportManager::new()),
         }
+    }
+
+    /// Get reference to transport manager for adding devices
+    pub fn transport_manager(&self) -> Arc<TransportManager> {
+        self.transport_manager.clone()
     }
 
     pub async fn bind(&mut self, port: Option<u16>) -> Result<()> {
@@ -50,10 +57,11 @@ impl DbgifServer {
 
                     info!("New client connected: {} (client_id: {})", addr, client_id);
                     
+                    let transport_manager = self.transport_manager.clone();
                     tokio::spawn(async move {
                         let tcp_transport = TcpTransport::new(format!("tcp_client_{}", client_id), stream);
                         let transport: Box<dyn Transport + Send> = Box::new(tcp_transport);
-                        let mut handler = ClientHandler::new(client_id, transport);
+                        let mut handler = ClientHandler::new(client_id, transport, transport_manager);
                         
                         if let Err(e) = handler.handle().await {
                             error!("Client {} disconnected with error: {}", client_id, e);
