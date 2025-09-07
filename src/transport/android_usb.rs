@@ -336,6 +336,7 @@ impl Drop for AndroidUsbTransport {
 /// Manager for multiple Android USB devices
 pub struct AndroidUsbTransportManager {
     devices: RwLock<HashMap<String, AndroidUsbTransport>>,
+    #[allow(dead_code)]
     context: UsbContext,
 }
 

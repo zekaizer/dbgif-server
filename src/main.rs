@@ -82,18 +82,21 @@ async fn main() -> Result<()> {
             }
         }
         _ = shutdown_signal => {
-            // Graceful shutdown
-            if let Some(ref mut monitor) = usb_monitor {
-                if let Err(e) = monitor.stop_monitoring().await {
-                    warn!("Error stopping USB monitor: {}", e);
-                } else {
-                    info!("USB monitoring stopped");
-                }
-            }
-            
-            info!("Server shutdown complete");
+            // Signal server to shutdown
+            server.shutdown();
         }
     }
+
+    // Stop USB monitoring
+    if let Some(ref mut monitor) = usb_monitor {
+        if let Err(e) = monitor.stop_monitoring().await {
+            warn!("Error stopping USB monitor: {}", e);
+        } else {
+            info!("USB monitoring stopped");
+        }
+    }
+    
+    info!("Server shutdown complete");
 
     Ok(())
 }
