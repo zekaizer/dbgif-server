@@ -7,6 +7,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Project Overview
 ADB (Android Debug Bridge) Protocol을 Base로 하는 DBGIF(Debug Interface) 서버를 Rust로 구현하는 프로젝트입니다. DBGIF 프로토콜 명세에 따라 클라이언트-서버 통신을 처리하며, 인증 과정은 간소화하여 구현합니다.
 
+### Cross-Platform Requirements
+**중요**: 이 프로젝트는 Linux와 Windows를 동시에 지원해야 합니다. 플랫폼별 코드보다는 공통 코드를 선호합니다.
+- 플랫폼 특정 기능이 필요한 경우 `cfg` 속성을 사용하여 조건부 컴파일
+- 가능한 한 cross-platform 라이브러리 사용
+- 파일 경로는 `std::path::Path`를 사용하여 OS 독립적으로 처리
+- USB 드라이버는 libusb를 통해 Linux/Windows 모두 지원
+
 ## Architecture
 
 ```
