@@ -75,9 +75,13 @@ pub mod bridge_usb;
 pub mod debug;
 pub mod manager;
 pub mod tcp;
+pub mod usb_common;
+pub mod usb_monitor;
 
 pub use android_usb::*;
 pub use bridge_usb::*;
 pub use debug::{is_debug_env_enabled, DebugTransport};
 pub use manager::*;
 pub use tcp::*;
+pub use usb_common::*;
+pub use usb_monitor::*;

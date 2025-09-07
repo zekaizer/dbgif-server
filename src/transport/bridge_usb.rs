@@ -6,9 +6,35 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
-use super::{ConnectionStatus, Transport, TransportType};
+use super::{ConnectionStatus, Transport, TransportType, UsbTransportFactory};
 use crate::protocol::constants::MAXDATA;
 use crate::protocol::message::Message;
+
+// USB Host-to-Host Bridge Cable device VID/PID pairs
+const SUPPORTED_BRIDGE_DEVICES: &[(u16, u16)] = &[
+    // Prolific devices
+    (0x067b, 0x2501), // PL-2501 USB-to-USB Bridge Cable
+    (0x067b, 0x2506), // PL-2506 USB Host-to-Host Bridge
+    (0x067b, 0x25a1), // PL-25A1 USB-to-USB Network Bridge
+    
+    // ASIX devices  
+    (0x0b95, 0x7720), // AX88772 USB-to-USB Bridge
+    (0x0b95, 0x772a), // AX88772A USB-to-USB Network Bridge
+    (0x0b95, 0x7e2b), // AX88772B USB-to-USB Bridge
+    
+    // ATEN devices
+    (0x0557, 0x2009), // UC-2324 USB-to-USB Bridge Cable
+    (0x0557, 0x7000), // UC-2322 USB Host-to-Host Bridge
+    
+    // Cables Unlimited devices
+    (0x0731, 0x2003), // USB-2003 USB Bridge Cable
+    
+    // StarTech devices  
+    (0x067b, 0x3500), // USB3SBRIDGE USB 3.0 Bridge Cable
+    
+    // Generic devices
+    (0x1234, 0x5678), // Generic USB Bridge Cable (placeholder)
+];
 
 // USB configuration and interface
 const USB_CONFIGURATION: u8 = 1;
@@ -398,9 +424,86 @@ impl Drop for BridgeUsbTransport {
     }
 }
 
+/// Factory for creating Bridge USB transports
+pub struct BridgeUsbFactory;
+
+impl BridgeUsbFactory {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+#[async_trait]
+impl UsbTransportFactory for BridgeUsbFactory {
+    fn supported_devices(&self) -> &[(u16, u16)] {
+        SUPPORTED_BRIDGE_DEVICES
+    }
+
+    async fn create_transport(
+        &self,
+        device: Device<rusb::GlobalContext>,
+    ) -> Result<Box<dyn Transport + Send>> {
+        let transport = BridgeUsbTransport::new(device)?;
+        Ok(Box::new(transport))
+    }
+
+    fn name(&self) -> &str {
+        "BridgeUSB"
+    }
+
+    fn validate_device(&self, device: &Device<rusb::GlobalContext>) -> Result<()> {
+        let descriptor = device.device_descriptor()?;
+        
+        // Additional validation for Bridge devices
+        // Check for required endpoints (Bulk IN/OUT + Interrupt IN)
+        let config_descriptor = device.config_descriptor(0)?;
+        
+        for interface in config_descriptor.interfaces() {
+            for interface_descriptor in interface.descriptors() {
+                let mut has_bulk_in = false;
+                let mut has_bulk_out = false;
+                let mut has_interrupt_in = false;
+                
+                for endpoint in interface_descriptor.endpoint_descriptors() {
+                    match endpoint.transfer_type() {
+                        rusb::TransferType::Bulk => match endpoint.direction() {
+                            rusb::Direction::In => has_bulk_in = true,
+                            rusb::Direction::Out => has_bulk_out = true,
+                        },
+                        rusb::TransferType::Interrupt => {
+                            if endpoint.direction() == rusb::Direction::In {
+                                has_interrupt_in = true;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                
+                if has_bulk_in && has_bulk_out && has_interrupt_in {
+                    return Ok(());
+                }
+            }
+        }
+        
+        // If required endpoints not found, still allow if VID/PID matches
+        debug!(
+            "Bridge device VID={:04x} PID={:04x} doesn't have required endpoints, but VID/PID matches",
+            descriptor.vendor_id(), descriptor.product_id()
+        );
+        Ok(())
+    }
+}
+
+impl Default for BridgeUsbFactory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transport::UsbDeviceInfo;
 
     #[test]
     fn test_connection_status_display() {
@@ -417,5 +520,32 @@ mod tests {
         // This would need a mock USB device to test fully
         // For now, just test the enum
         assert_eq!(TransportType::BridgeUsb.to_string(), "Bridge USB");
+    }
+
+    #[test]
+    fn test_bridge_usb_factory() {
+        let factory = BridgeUsbFactory::new();
+        assert_eq!(factory.name(), "BridgeUSB");
+        assert!(!factory.supported_devices().is_empty());
+        
+        // Test Prolific PL-2501 VID/PID matching
+        let prolific_info = UsbDeviceInfo {
+            vendor_id: 0x067b,
+            product_id: 0x2501,
+            bus_number: 1,
+            address: 3,
+            serial: Some("bridge_test".to_string()),
+        };
+        assert!(factory.matches(&prolific_info));
+        
+        // Test non-matching device
+        let unknown_info = UsbDeviceInfo {
+            vendor_id: 0xffff,
+            product_id: 0xffff,
+            bus_number: 1,
+            address: 4,
+            serial: None,
+        };
+        assert!(!factory.matches(&unknown_info));
     }
 }
