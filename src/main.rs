@@ -3,7 +3,7 @@ use tracing::{info, error};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use tokio::signal;
 
-use dbgif_server::connection::DbgifServer;
+use dbgif_server::server::DbgifServer;
 
 #[tokio::main]
 async fn main() -> Result<()> {

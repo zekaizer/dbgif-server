@@ -1,5 +1,7 @@
 pub mod protocol;
-pub mod connection;
+pub mod transport;
+pub mod server;
 
 pub use protocol::*;
-pub use connection::*;
+pub use transport::*;
+pub use server::*;

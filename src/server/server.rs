@@ -1,11 +1,13 @@
 use std::sync::Arc;
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 use tracing::{info, error, debug};
 use anyhow::Result;
 
 use crate::protocol::constants::DEFAULT_PORT;
 use super::client_handler::ClientHandler;
+use crate::transport::tcp::TcpTransport;
+use crate::transport::Transport;
 
 pub struct DbgifServer {
     listener: Option<TcpListener>,
@@ -49,7 +51,10 @@ impl DbgifServer {
                     info!("New client connected: {} (client_id: {})", addr, client_id);
                     
                     tokio::spawn(async move {
-                        let mut handler = ClientHandler::new(client_id, stream);
+                        let tcp_transport = TcpTransport::new(format!("tcp_client_{}", client_id), stream);
+                        let transport: Box<dyn Transport + Send> = Box::new(tcp_transport);
+                        let mut handler = ClientHandler::new(client_id, transport);
+                        
                         if let Err(e) = handler.handle().await {
                             error!("Client {} disconnected with error: {}", client_id, e);
                         } else {

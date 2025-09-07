@@ -1,12 +1,10 @@
-use std::io;
-use tokio::net::TcpStream;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tracing::{info, debug, error, warn};
-use bytes::{Bytes, BytesMut, Buf};
+use tracing::{info, debug, error};
+use bytes::Bytes;
 use anyhow::Result;
 
 use crate::protocol::{Message, Command, VERSION};
-use super::stream::{StreamManager, StreamState};
+use crate::protocol::stream::StreamManager;
+use crate::transport::Transport;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ClientState {
@@ -17,16 +15,16 @@ pub enum ClientState {
 
 pub struct ClientHandler {
     client_id: u32,
-    stream: TcpStream,
+    transport: Box<dyn Transport + Send>,
     state: ClientState,
     stream_manager: StreamManager,
 }
 
 impl ClientHandler {
-    pub fn new(client_id: u32, stream: TcpStream) -> Self {
+    pub fn new(client_id: u32, transport: Box<dyn Transport + Send>) -> Self {
         Self {
             client_id,
-            stream,
+            transport,
             state: ClientState::Connecting,
             stream_manager: StreamManager::new(),
         }
@@ -36,18 +34,14 @@ impl ClientHandler {
         info!("Starting client handler for client {}", self.client_id);
 
         loop {
-            match self.read_message().await {
-                Ok(Some(message)) => {
+            match self.transport.receive_message().await {
+                Ok(message) => {
                     debug!("Client {} received message: {:?}", self.client_id, message.command);
                     
                     if let Err(e) = self.handle_message(message).await {
                         error!("Error handling message for client {}: {}", self.client_id, e);
                         break;
                     }
-                }
-                Ok(None) => {
-                    debug!("Client {} disconnected", self.client_id);
-                    break;
                 }
                 Err(e) => {
                     error!("Error reading message from client {}: {}", self.client_id, e);
@@ -59,45 +53,16 @@ impl ClientHandler {
         self.state = ClientState::Disconnected;
         self.stream_manager.close_all_streams();
         
+        // Disconnect transport
+        if let Err(e) = self.transport.disconnect().await {
+            error!("Failed to disconnect transport for client {}: {}", self.client_id, e);
+        }
+        
         Ok(())
     }
 
-    async fn read_message(&mut self) -> Result<Option<Message>> {
-        // Read header (24 bytes)
-        let mut header = [0u8; 24];
-        
-        match self.stream.read_exact(&mut header).await {
-            Ok(_) => {},
-            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
-                return Ok(None); // Client disconnected
-            },
-            Err(e) => return Err(e.into()),
-        }
-
-        // Parse header to get data length
-        let mut buf = BytesMut::from(&header[..]);
-        let _command = buf.get_u32_le();
-        let _arg0 = buf.get_u32_le();
-        let _arg1 = buf.get_u32_le();
-        let data_length = buf.get_u32_le();
-
-        // Read data payload if present
-        let mut full_message = BytesMut::with_capacity(24 + data_length as usize);
-        full_message.extend_from_slice(&header);
-        
-        if data_length > 0 {
-            let mut data = vec![0u8; data_length as usize];
-            self.stream.read_exact(&mut data).await?;
-            full_message.extend_from_slice(&data);
-        }
-
-        let message = Message::deserialize(full_message.freeze())?;
-        Ok(Some(message))
-    }
-
     async fn send_message(&mut self, message: Message) -> Result<()> {
-        let data = message.serialize();
-        self.stream.write_all(&data).await?;
+        self.transport.send_message(&message).await?;
         debug!("Client {} sent message: {:?}", self.client_id, message.command);
         Ok(())
     }
@@ -115,7 +80,7 @@ impl ClientHandler {
         }
     }
 
-    async fn handle_connect(&mut self, message: Message) -> Result<()> {
+    async fn handle_connect(&mut self, _message: Message) -> Result<()> {
         info!("Client {} initiated CNXN handshake", self.client_id);
         
         // Simplified auth - skip auth token request and go straight to connected
@@ -133,7 +98,7 @@ impl ClientHandler {
         Ok(())
     }
 
-    async fn handle_auth(&mut self, message: Message) -> Result<()> {
+    async fn handle_auth(&mut self, _message: Message) -> Result<()> {
         // Simplified auth - always accept
         debug!("Client {} sent AUTH, accepting without verification", self.client_id);
         

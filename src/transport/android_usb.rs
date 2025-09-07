@@ -4,9 +4,11 @@ use anyhow::{Result, bail, Context};
 use rusb::{Context as UsbContext, Device, DeviceHandle};
 use tokio::sync::RwLock;
 use tracing::{info, warn, debug};
+use async_trait::async_trait;
 
 use crate::protocol::message::Message;
 use crate::protocol::constants::MAXDATA;
+use super::{Transport, TransportType};
 
 // Android/Google vendor ID
 const ANDROID_VENDOR_ID: u16 = 0x18d1;
@@ -18,16 +20,17 @@ const USB_INTERFACE: u8 = 0;
 // Timeout for USB operations (5 seconds)
 const USB_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Individual USB device transport
-pub struct UsbTransport {
+/// Android USB device transport
+pub struct AndroidUsbTransport {
     device_id: String,
     handle: DeviceHandle<rusb::GlobalContext>,
     in_endpoint: u8,
     out_endpoint: u8,
+    is_connected: bool,
 }
 
-impl UsbTransport {
-    /// Create new USB transport for a device
+impl AndroidUsbTransport {
+    /// Create new Android USB transport for a device
     pub fn new(device: Device<rusb::GlobalContext>) -> Result<Self> {
         let device_descriptor = device.device_descriptor()
             .context("Failed to get device descriptor")?;
@@ -83,11 +86,12 @@ impl UsbTransport {
         let out_endpoint = out_endpoint
             .context("No bulk OUT endpoint found")?;
 
-        Ok(UsbTransport {
+        Ok(AndroidUsbTransport {
             device_id,
             handle,
             in_endpoint,
             out_endpoint,
+            is_connected: true,
         })
     }
 
@@ -105,11 +109,23 @@ impl UsbTransport {
         let data = &serialized[24..];
 
         // Send header first
-        self.send_bulk(header)?;
+        match self.send_bulk(header) {
+            Ok(_) => {},
+            Err(e) => {
+                self.is_connected = false;
+                return Err(e);
+            }
+        }
 
         // Send data if present
         if !data.is_empty() {
-            self.send_bulk(data)?;
+            match self.send_bulk(data) {
+                Ok(_) => {},
+                Err(e) => {
+                    self.is_connected = false;
+                    return Err(e);
+                }
+            }
         }
 
         debug!("Sent message to device {}: {:?}", self.device_id, message.command);
@@ -120,9 +136,16 @@ impl UsbTransport {
     pub fn receive_message(&mut self) -> Result<Message> {
         // Receive header first (24 bytes)
         let mut header_buf = vec![0u8; 24];
-        let header_len = self.receive_bulk(&mut header_buf)?;
+        let header_len = match self.receive_bulk(&mut header_buf) {
+            Ok(len) => len,
+            Err(e) => {
+                self.is_connected = false;
+                return Err(e);
+            }
+        };
         
         if header_len != 24 {
+            self.is_connected = false;
             bail!("Invalid header size: expected 24 bytes, got {}", header_len);
         }
 
@@ -139,9 +162,16 @@ impl UsbTransport {
             }
 
             let mut data_buf = vec![0u8; data_length];
-            let data_len = self.receive_bulk(&mut data_buf)?;
+            let data_len = match self.receive_bulk(&mut data_buf) {
+                Ok(len) => len,
+                Err(e) => {
+                    self.is_connected = false;
+                    return Err(e);
+                }
+            };
             
             if data_len != data_length {
+                self.is_connected = false;
                 bail!("Data length mismatch: expected {}, got {}", data_length, data_len);
             }
 
@@ -187,7 +217,55 @@ impl UsbTransport {
     }
 }
 
-impl Drop for UsbTransport {
+#[async_trait]
+impl Transport for AndroidUsbTransport {
+    async fn send_message(&mut self, message: &Message) -> Result<()> {
+        // Call the existing method
+        Self::send_message(self, message)
+    }
+
+    async fn receive_message(&mut self) -> Result<Message> {
+        // Call the existing method
+        Self::receive_message(self)
+    }
+
+    async fn connect(&mut self) -> Result<()> {
+        // USB devices are connected upon creation
+        // This is mainly for reconnection scenarios
+        self.is_connected = true;
+        info!("USB device {} connected", self.device_id);
+        Ok(())
+    }
+
+    async fn disconnect(&mut self) -> Result<()> {
+        self.is_connected = false;
+        info!("USB device {} marked as disconnected", self.device_id);
+        Ok(())
+    }
+
+    async fn is_connected(&self) -> bool {
+        self.is_connected
+    }
+
+    fn device_id(&self) -> &str {
+        &self.device_id
+    }
+
+    fn transport_type(&self) -> TransportType {
+        TransportType::Usb
+    }
+
+    async fn health_check(&self) -> Result<()> {
+        if self.is_connected {
+            // Could add actual USB device validation here
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("USB device {} is not connected", self.device_id))
+        }
+    }
+}
+
+impl Drop for AndroidUsbTransport {
     fn drop(&mut self) {
         if let Err(e) = self.handle.release_interface(USB_INTERFACE) {
             warn!("Failed to release USB interface for device {}: {}", self.device_id, e);
@@ -195,19 +273,19 @@ impl Drop for UsbTransport {
     }
 }
 
-/// Manager for multiple USB devices
-pub struct UsbTransportManager {
-    devices: RwLock<HashMap<String, UsbTransport>>,
+/// Manager for multiple Android USB devices
+pub struct AndroidUsbTransportManager {
+    devices: RwLock<HashMap<String, AndroidUsbTransport>>,
     context: UsbContext,
 }
 
-impl UsbTransportManager {
-    /// Create new USB transport manager
+impl AndroidUsbTransportManager {
+    /// Create new Android USB transport manager
     pub fn new() -> Result<Self> {
         let context = UsbContext::new()
             .context("Failed to create USB context")?;
 
-        Ok(UsbTransportManager {
+        Ok(AndroidUsbTransportManager {
             devices: RwLock::new(HashMap::new()),
             context,
         })
@@ -225,9 +303,9 @@ impl UsbTransportManager {
         Ok(found_devices)
     }
 
-    /// Add a new USB device
+    /// Add a new Android USB device
     pub async fn add_device(&self, device: Device<rusb::GlobalContext>) -> Result<String> {
-        let transport = UsbTransport::new(device)?;
+        let transport = AndroidUsbTransport::new(device)?;
         let device_id = transport.device_id().to_string();
 
         let mut devices = self.devices.write().await;
@@ -314,21 +392,21 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_usb_manager_creation() {
-        let manager = UsbTransportManager::new();
+    async fn test_android_usb_manager_creation() {
+        let manager = AndroidUsbTransportManager::new();
         assert!(manager.is_ok());
     }
 
     #[tokio::test]
     async fn test_device_list_empty() {
-        let manager = UsbTransportManager::new().unwrap();
+        let manager = AndroidUsbTransportManager::new().unwrap();
         let devices = manager.get_device_ids().await;
         assert!(devices.is_empty());
     }
 
     #[tokio::test]
     async fn test_scan_devices() {
-        let manager = UsbTransportManager::new().unwrap();
+        let manager = AndroidUsbTransportManager::new().unwrap();
         let result = manager.scan_devices().await;
         // This should not fail even if no devices are connected
         assert!(result.is_ok());
