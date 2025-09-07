@@ -1,4 +1,4 @@
-// ADB protocol constants
+// dbgif protocol constants
 pub const VERSION: u32 = 0x01000000;
 pub const MAXDATA: usize = 256 * 1024; // 256KB
 pub const DEFAULT_PORT: u16 = 5037;
