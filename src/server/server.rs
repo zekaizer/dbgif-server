@@ -1,7 +1,7 @@
 use anyhow::Result;
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use tokio::sync::{RwLock, watch};
+use tokio::sync::{watch, RwLock};
 use tracing::{debug, error, info};
 
 use super::client_handler::ClientHandler;
@@ -59,7 +59,7 @@ impl DbgifServer {
             .ok_or_else(|| anyhow::anyhow!("Server not bound. Call bind() first"))?;
 
         let mut shutdown_rx = self.shutdown_rx.clone();
-        
+
         loop {
             tokio::select! {
                 result = listener.accept() => {

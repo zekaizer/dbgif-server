@@ -263,15 +263,15 @@ impl TransportManager {
     /// Handle USB device disconnect (called by UsbMonitor)
     pub async fn handle_usb_disconnect(&self, device_id: &str) -> Result<()> {
         info!("Handling USB disconnect for device: {}", device_id);
-        
+
         // Remove the transport (this also calls disconnect on the transport)
         self.remove_transport(device_id).await?;
-        
+
         // Additional cleanup could go here:
         // - Notify connected clients about device loss
         // - Clean up any device-specific resources
         // - Update device status in any registries
-        
+
         info!("USB device {} disconnect handling complete", device_id);
         Ok(())
     }

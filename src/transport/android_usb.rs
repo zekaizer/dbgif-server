@@ -18,40 +18,31 @@ const SUPPORTED_ANDROID_DEVICES: &[(u16, u16)] = &[
     (0x18d1, 0x4ee1), // Nexus 4/5/6 (ADB)
     (0x18d1, 0x4ee2), // Nexus 7 (2012)
     (0x18d1, 0x4ee4), // Nexus 10
-    
-    // Samsung devices  
+    // Samsung devices
     (0x04e8, 0x6860), // Galaxy series (ADB)
     (0x04e8, 0x6863), // Galaxy S3
     (0x04e8, 0x685d), // Galaxy Note series
     (0x04e8, 0x6866), // Galaxy Tab series
-    
     // LG devices
     (0x1004, 0x631c), // G series phones
     (0x1004, 0x633e), // Optimus series
     (0x1004, 0x6344), // V series phones
-    
     // HTC devices
     (0x0bb4, 0x0c02), // Dream/Magic/Hero
     (0x0bb4, 0x0c03), // One series
     (0x0bb4, 0x0ff9), // Desire series
-    
     // Xiaomi devices
     (0x2717, 0xff40), // Mi/Redmi series
     (0x2717, 0xff48), // POCO series
-    
     // Huawei devices
     (0x12d1, 0x1038), // P/Mate series
     (0x12d1, 0x1057), // Honor series
-    
     // OnePlus devices
     (0x2a70, 0x4ee7), // OnePlus series
-    
-    // OPPO devices  
+    // OPPO devices
     (0x22d9, 0x2764), // Find/Reno series
-    
     // Vivo devices
     (0x2d95, 0x600a), // V/X series
-    
     // Motorola devices
     (0x22b8, 0x2e76), // Moto series
     (0x22b8, 0x2e82), // Edge series
@@ -476,25 +467,27 @@ impl UsbTransportFactory for AndroidUsbFactory {
 
     fn validate_device(&self, device: &Device<rusb::GlobalContext>) -> Result<()> {
         let descriptor = device.device_descriptor()?;
-        
+
         // Additional validation for Android devices
         // Check if device has ADB interface (class 255, subclass 66, protocol 1)
         let config_descriptor = device.config_descriptor(0)?;
-        
+
         for interface in config_descriptor.interfaces() {
             for interface_descriptor in interface.descriptors() {
-                if interface_descriptor.class_code() == 255 
-                    && interface_descriptor.sub_class_code() == 66 
-                    && interface_descriptor.protocol_code() == 1 {
+                if interface_descriptor.class_code() == 255
+                    && interface_descriptor.sub_class_code() == 66
+                    && interface_descriptor.protocol_code() == 1
+                {
                     return Ok(());
                 }
             }
         }
-        
+
         // Fallback: if VID/PID matches, assume it's valid
         debug!(
             "Android device VID={:04x} PID={:04x} doesn't have ADB interface, but VID/PID matches",
-            descriptor.vendor_id(), descriptor.product_id()
+            descriptor.vendor_id(),
+            descriptor.product_id()
         );
         Ok(())
     }
@@ -537,7 +530,7 @@ mod tests {
         let factory = AndroidUsbFactory::new();
         assert_eq!(factory.name(), "AndroidUSB");
         assert!(!factory.supported_devices().is_empty());
-        
+
         // Test Google Pixel VID/PID matching
         let pixel_info = UsbDeviceInfo {
             vendor_id: 0x18d1,
@@ -547,7 +540,7 @@ mod tests {
             serial: Some("test".to_string()),
         };
         assert!(factory.matches(&pixel_info));
-        
+
         // Test non-matching device
         let unknown_info = UsbDeviceInfo {
             vendor_id: 0x0000,

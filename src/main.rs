@@ -41,10 +41,13 @@ async fn main() -> Result<()> {
 
         // Start USB monitoring
         if let Err(e) = monitor.start_monitoring().await {
-            warn!("Failed to start USB monitoring: {} (continuing without hotplug)", e);
+            warn!(
+                "Failed to start USB monitoring: {} (continuing without hotplug)",
+                e
+            );
         } else {
             info!("USB hotplug monitoring enabled");
-            
+
             // Scan for existing devices
             match monitor.scan_existing_devices().await {
                 Ok(count) => {
@@ -95,7 +98,7 @@ async fn main() -> Result<()> {
             info!("USB monitoring stopped");
         }
     }
-    
+
     info!("Server shutdown complete");
 
     Ok(())

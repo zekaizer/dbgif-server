@@ -65,9 +65,7 @@ pub fn get_device_info(device: &Device<GlobalContext>) -> Result<UsbDeviceInfo> 
 
     // Try to get serial number
     let serial = match device.open() {
-        Ok(handle) => handle
-            .read_serial_number_string_ascii(&descriptor)
-            .ok(),
+        Ok(handle) => handle.read_serial_number_string_ascii(&descriptor).ok(),
         Err(_) => None,
     };
 
