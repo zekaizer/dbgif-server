@@ -3,11 +3,10 @@ use async_trait::async_trait;
 use rusb::{Device, DeviceHandle};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{watch, Mutex};
-use tokio::task::JoinHandle;
-use tracing::{debug, error, info, warn};
+use tokio::sync::Mutex;
+use tracing::{debug, info, warn};
 
-use super::{ConnectionStatus, MonitorableTransport, Transport, TransportType};
+use super::{ConnectionStatus, Transport, TransportType};
 use crate::protocol::constants::MAXDATA;
 use crate::protocol::message::Message;
 
@@ -17,9 +16,8 @@ const USB_INTERFACE: u8 = 0;
 
 // Timeout for USB operations
 const USB_TIMEOUT: Duration = Duration::from_secs(5);
-const INTERRUPT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-/// Bridge USB Transport with connection monitoring
+/// Bridge USB Transport
 pub struct BridgeUsbTransport {
     device_id: String,
     handle: Arc<Mutex<DeviceHandle<rusb::GlobalContext>>>,
@@ -27,11 +25,6 @@ pub struct BridgeUsbTransport {
     out_endpoint: u8,
     interrupt_endpoint: u8,
     is_connected: bool,
-
-    // Connection monitoring
-    status_tx: Option<watch::Sender<ConnectionStatus>>,
-    status_rx: Option<watch::Receiver<ConnectionStatus>>,
-    monitor_task: Option<JoinHandle<()>>,
 }
 
 impl BridgeUsbTransport {
@@ -111,9 +104,6 @@ impl BridgeUsbTransport {
             out_endpoint,
             interrupt_endpoint,
             is_connected: true,
-            status_tx: None,
-            status_rx: None,
-            monitor_task: None,
         })
     }
 
@@ -132,11 +122,6 @@ impl BridgeUsbTransport {
             Ok(_) => {}
             Err(e) => {
                 self.is_connected = false;
-                self.update_status(ConnectionStatus::Error(format!(
-                    "Send header failed: {}",
-                    e
-                )))
-                .await;
                 return Err(e);
             }
         }
@@ -147,8 +132,6 @@ impl BridgeUsbTransport {
                 Ok(_) => {}
                 Err(e) => {
                     self.is_connected = false;
-                    self.update_status(ConnectionStatus::Error(format!("Send data failed: {}", e)))
-                        .await;
                     return Err(e);
                 }
             }
@@ -171,11 +154,6 @@ impl BridgeUsbTransport {
             Ok(len) => len,
             Err(e) => {
                 self.is_connected = false;
-                self.update_status(ConnectionStatus::Error(format!(
-                    "Receive header failed: {}",
-                    e
-                )))
-                .await;
                 return Err(e);
             }
         };
@@ -183,8 +161,6 @@ impl BridgeUsbTransport {
         if header_len != 24 {
             self.is_connected = false;
             let error = format!("Invalid header size: expected 24 bytes, got {}", header_len);
-            self.update_status(ConnectionStatus::Error(error.clone()))
-                .await;
             bail!(error);
         }
 
@@ -208,11 +184,6 @@ impl BridgeUsbTransport {
                 Ok(len) => len,
                 Err(e) => {
                     self.is_connected = false;
-                    self.update_status(ConnectionStatus::Error(format!(
-                        "Receive data failed: {}",
-                        e
-                    )))
-                    .await;
                     return Err(e);
                 }
             };
@@ -223,8 +194,6 @@ impl BridgeUsbTransport {
                     "Data length mismatch: expected {}, got {}",
                     data_length, data_len
                 );
-                self.update_status(ConnectionStatus::Error(error.clone()))
-                    .await;
                 bail!(error);
             }
 
@@ -295,18 +264,17 @@ impl BridgeUsbTransport {
 
                 match status_byte {
                     0x00 => Ok(ConnectionStatus::Disconnected),
-                    0x01 => Ok(ConnectionStatus::Connected),
-                    0x02 => Ok(ConnectionStatus::Suspended),
+                    0x01 => Ok(ConnectionStatus::Ready),
                     0xFF => Ok(ConnectionStatus::Error("Bridge cable error".to_string())),
                     _ => {
                         debug!("Unknown bridge status byte: 0x{:02x}", status_byte);
-                        Ok(ConnectionStatus::Connected) // Assume connected for unknown values
+                        Ok(ConnectionStatus::Disconnected) // Assume disconnected for safety
                     }
                 }
             }
             Err(rusb::Error::Timeout) => {
-                // Timeout is normal for polling - assume still connected
-                Ok(ConnectionStatus::Connected)
+                // Timeout is normal for polling - assume remote still disconnected
+                Ok(ConnectionStatus::Disconnected)
             }
             Err(e) => {
                 warn!("Failed to read bridge connection status: {}", e);
@@ -315,75 +283,6 @@ impl BridgeUsbTransport {
                     e
                 )))
             }
-        }
-    }
-
-    /// Start monitoring task
-    async fn start_monitor_task(&mut self) -> Result<()> {
-        if self.monitor_task.is_some() {
-            return Ok(()); // Already monitoring
-        }
-
-        let (tx, rx) = watch::channel(ConnectionStatus::Connected);
-        self.status_tx = Some(tx.clone());
-        self.status_rx = Some(rx);
-
-        let device_id = self.device_id.clone();
-        let handle_clone = self.handle.clone();
-        let interrupt_endpoint = self.interrupt_endpoint;
-
-        let task = tokio::spawn(async move {
-            info!(
-                "Starting connection monitoring for bridge device {}",
-                device_id
-            );
-
-            loop {
-                tokio::time::sleep(INTERRUPT_POLL_INTERVAL).await;
-
-                // Read status from interrupt endpoint
-                let handle = handle_clone.lock().await;
-                let mut status_buffer = [0u8; 4];
-
-                let status = match handle.read_interrupt(
-                    interrupt_endpoint,
-                    &mut status_buffer,
-                    Duration::from_millis(100),
-                ) {
-                    Ok(bytes_read) if bytes_read > 0 => match status_buffer[0] {
-                        0x00 => ConnectionStatus::Disconnected,
-                        0x01 => ConnectionStatus::Connected,
-                        0x02 => ConnectionStatus::Suspended,
-                        0xFF => ConnectionStatus::Error("Bridge cable error".to_string()),
-                        _ => ConnectionStatus::Connected,
-                    },
-                    Ok(_) => ConnectionStatus::Disconnected,
-                    Err(rusb::Error::Timeout) => continue, // Normal during polling
-                    Err(e) => {
-                        error!(
-                            "Bridge connection monitoring error for {}: {}",
-                            device_id, e
-                        );
-                        ConnectionStatus::Error(format!("Monitor error: {}", e))
-                    }
-                };
-
-                // Send status update if changed
-                if let Err(_) = tx.send(status) {
-                    debug!("Bridge connection monitor stopped for device {}", device_id);
-                    break;
-                }
-            }
-        });
-
-        self.monitor_task = Some(task);
-        Ok(())
-    }
-
-    /// Update connection status
-    async fn update_status(&self, status: ConnectionStatus) {
-        if let Some(tx) = &self.status_tx {
-            let _ = tx.send(status);
         }
     }
 }
@@ -399,26 +298,60 @@ impl Transport for BridgeUsbTransport {
     }
 
     async fn connect(&mut self) -> Result<()> {
-        self.is_connected = true;
-        self.update_status(ConnectionStatus::Connected).await;
-        info!("Bridge USB device {} connected", self.device_id);
+        // Stage 1: USB connection is already established (done in constructor)
+        info!(
+            "Bridge USB device {} physically connected, checking remote connection...",
+            self.device_id
+        );
+
+        // Check current remote status and set connection state accordingly
+        match self.read_connection_status().await {
+            Ok(ConnectionStatus::Ready) => {
+                // Both USB and remote are connected - ready for communication
+                self.is_connected = true;
+                info!(
+                    "Bridge USB device {} ready (remote already connected)",
+                    self.device_id
+                );
+            }
+            Ok(ConnectionStatus::Disconnected) => {
+                // USB connected but remote disconnected - connected but not ready
+                self.is_connected = false;
+                info!(
+                    "Bridge USB device {} connected (waiting for remote)",
+                    self.device_id
+                );
+            }
+            Ok(status) => {
+                // Other status (Error) - not ready
+                self.is_connected = false;
+                info!(
+                    "Bridge USB device {} connected, remote status: {}",
+                    self.device_id, status
+                );
+            }
+            Err(e) => {
+                // Cannot determine remote status - connected with error info
+                self.is_connected = false;
+                warn!(
+                    "Bridge USB device {} connected, remote status unknown: {}",
+                    self.device_id, e
+                );
+            }
+        }
+
         Ok(())
     }
 
     async fn disconnect(&mut self) -> Result<()> {
         self.is_connected = false;
-        self.update_status(ConnectionStatus::Disconnected).await;
-
-        // Stop monitoring
-        if let Some(task) = self.monitor_task.take() {
-            task.abort();
-        }
-
         info!("Bridge USB device {} disconnected", self.device_id);
         Ok(())
     }
 
     async fn is_connected(&self) -> bool {
+        // is_connected flag now accurately represents full connection state
+        // (both USB and remote connected)
         self.is_connected
     }
 
@@ -433,14 +366,14 @@ impl Transport for BridgeUsbTransport {
     async fn health_check(&self) -> Result<()> {
         if !self.is_connected {
             return Err(anyhow::anyhow!(
-                "Bridge USB device {} is not connected",
+                "Bridge USB device {} is disconnected",
                 self.device_id
             ));
         }
 
         // Check actual connection status via interrupt endpoint
         match self.read_connection_status().await? {
-            ConnectionStatus::Connected => Ok(()),
+            ConnectionStatus::Ready => Ok(()),
             status => Err(anyhow::anyhow!(
                 "Bridge USB device {} health check failed: {}",
                 self.device_id,
@@ -448,52 +381,18 @@ impl Transport for BridgeUsbTransport {
             )),
         }
     }
-}
-
-#[async_trait]
-impl MonitorableTransport for BridgeUsbTransport {
-    async fn start_monitoring(&mut self) -> Result<watch::Receiver<ConnectionStatus>> {
-        self.start_monitor_task().await?;
-
-        self.status_rx
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("Monitoring not initialized"))
-    }
-
-    async fn stop_monitoring(&mut self) -> Result<()> {
-        if let Some(task) = self.monitor_task.take() {
-            task.abort();
-            info!(
-                "Stopped connection monitoring for bridge device {}",
-                self.device_id
-            );
-        }
-        Ok(())
-    }
 
     async fn get_connection_status(&self) -> ConnectionStatus {
+        // Read real-time status from interrupt endpoint
         match self.read_connection_status().await {
             Ok(status) => status,
             Err(e) => ConnectionStatus::Error(format!("Status check failed: {}", e)),
         }
     }
-
-    fn supports_hotplug(&self) -> bool {
-        true
-    }
-
-    fn supports_reconnection(&self) -> bool {
-        true
-    }
 }
 
 impl Drop for BridgeUsbTransport {
     fn drop(&mut self) {
-        // Abort monitoring task if still running
-        if let Some(task) = &self.monitor_task {
-            task.abort();
-        }
-
         // Note: USB handle cleanup will be done by the Mutex Drop
         info!("Bridge USB transport {} dropped", self.device_id);
     }

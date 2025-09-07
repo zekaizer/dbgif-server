@@ -1,7 +1,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use std::fmt;
-use tokio::sync::watch;
 
 use crate::protocol::message::Message;
 
@@ -25,9 +24,8 @@ impl fmt::Display for TransportType {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConnectionStatus {
     Disconnected,
-    Connecting,
     Connected,
-    Suspended,
+    Ready,
     Error(String),
 }
 
@@ -35,9 +33,8 @@ impl fmt::Display for ConnectionStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ConnectionStatus::Disconnected => write!(f, "Disconnected"),
-            ConnectionStatus::Connecting => write!(f, "Connecting"),
             ConnectionStatus::Connected => write!(f, "Connected"),
-            ConnectionStatus::Suspended => write!(f, "Suspended"),
+            ConnectionStatus::Ready => write!(f, "Ready"),
             ConnectionStatus::Error(err) => write!(f, "Error: {}", err),
         }
     }
@@ -62,20 +59,14 @@ pub trait Transport: Send + Sync {
             Err(anyhow::anyhow!("Transport is not connected"))
         }
     }
-}
 
-#[async_trait]
-pub trait MonitorableTransport: Transport {
-    async fn start_monitoring(&mut self) -> Result<watch::Receiver<ConnectionStatus>>;
-    async fn stop_monitoring(&mut self) -> Result<()>;
-    async fn get_connection_status(&self) -> ConnectionStatus;
-
-    fn supports_hotplug(&self) -> bool {
-        false
-    }
-
-    fn supports_reconnection(&self) -> bool {
-        true
+    /// Get current connection status - default implementation
+    async fn get_connection_status(&self) -> ConnectionStatus {
+        if self.is_connected().await {
+            ConnectionStatus::Ready
+        } else {
+            ConnectionStatus::Disconnected
+        }
     }
 }
 

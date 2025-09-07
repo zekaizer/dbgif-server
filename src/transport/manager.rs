@@ -1,16 +1,17 @@
 use anyhow::Result;
 use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::sync::{watch, RwLock};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
-use super::debug::{is_debug_env_enabled, DebugTransport};
-use super::{ConnectionStatus, MonitorableTransport, Transport, TransportType};
+use super::debug::DebugTransport;
+use super::{ConnectionStatus, Transport, TransportType};
 use crate::protocol::message::Message;
 
 /// Unified manager for all transport types
 pub struct TransportManager {
-    transports: RwLock<HashMap<String, Box<dyn Transport + Send>>>,
+    transports: Arc<RwLock<HashMap<String, Box<dyn Transport + Send>>>>,
     monitors: RwLock<HashMap<String, watch::Receiver<ConnectionStatus>>>,
     monitor_tasks: RwLock<HashMap<String, JoinHandle<()>>>,
 }
@@ -19,7 +20,7 @@ impl TransportManager {
     /// Create new transport manager
     pub fn new() -> Self {
         Self {
-            transports: RwLock::new(HashMap::new()),
+            transports: Arc::new(RwLock::new(HashMap::new())),
             monitors: RwLock::new(HashMap::new()),
             monitor_tasks: RwLock::new(HashMap::new()),
         }
@@ -33,13 +34,29 @@ impl TransportManager {
         // Initialize connection
         transport.connect().await?;
 
+        // Check current connection status to determine if polling is needed
+        let status = transport.get_connection_status().await;
+
         // Add transport to collection
         self.transports
             .write()
             .await
             .insert(device_id.clone(), transport);
 
-        info!("Added {} transport: {}", transport_type, device_id);
+        // Start polling for Connected -> Ready transition
+        if status == ConnectionStatus::Connected {
+            info!(
+                "Added {} transport: {} (starting status polling)",
+                transport_type, device_id
+            );
+            self.start_status_polling(&device_id).await?;
+        } else {
+            info!(
+                "Added {} transport: {} (status: {})",
+                transport_type, device_id, status
+            );
+        }
+
         Ok(device_id)
     }
 
@@ -65,7 +82,7 @@ impl TransportManager {
     ) -> Result<String> {
         #[cfg(feature = "transport-debug")]
         {
-            let debug_enabled = is_debug_env_enabled();
+            let debug_enabled = crate::transport::debug::is_debug_env_enabled();
             self.add_transport_with_debug(transport, debug_enabled)
                 .await
         }
@@ -74,82 +91,6 @@ impl TransportManager {
         {
             // When debug feature is disabled, just add transport directly
             self.add_transport(transport).await
-        }
-    }
-
-    /// Add a monitorable transport with status monitoring
-    pub async fn add_monitorable_transport(
-        &self,
-        mut transport: Box<dyn MonitorableTransport + Send>,
-    ) -> Result<String> {
-        let device_id = transport.device_id().to_string();
-        let transport_type = transport.transport_type();
-
-        // Initialize connection
-        transport.connect().await?;
-
-        // Start monitoring
-        match transport.start_monitoring().await {
-            Ok(rx) => {
-                self.monitors.write().await.insert(device_id.clone(), rx);
-                self.start_status_monitor(&device_id).await;
-                info!(
-                    "Started monitoring for {} transport: {}",
-                    transport_type, device_id
-                );
-            }
-            Err(e) => {
-                warn!("Failed to start monitoring for {}: {}", device_id, e);
-            }
-        }
-
-        // Add transport to collection (upcast to Transport trait)
-        let transport_boxed: Box<dyn Transport + Send> = transport;
-        self.transports
-            .write()
-            .await
-            .insert(device_id.clone(), transport_boxed);
-
-        info!(
-            "Added monitored {} transport: {}",
-            transport_type, device_id
-        );
-        Ok(device_id)
-    }
-
-    /// Add a monitorable transport with optional debug wrapping
-    pub async fn add_monitorable_transport_with_debug(
-        &self,
-        transport: Box<dyn MonitorableTransport + Send>,
-        enable_debug: bool,
-    ) -> Result<String> {
-        if enable_debug {
-            // For now, monitorable transports don't support debug wrapping in the simplified version
-            // Just add the transport directly
-            warn!("Debug wrapping for MonitorableTransport not implemented in simplified version");
-            self.add_monitorable_transport(transport).await
-        } else {
-            self.add_monitorable_transport(transport).await
-        }
-    }
-
-    /// Add monitorable transport with debug automatically enabled based on environment
-    #[inline]
-    pub async fn add_monitorable_transport_auto_debug(
-        &self,
-        transport: Box<dyn MonitorableTransport + Send>,
-    ) -> Result<String> {
-        #[cfg(feature = "transport-debug")]
-        {
-            let debug_enabled = is_debug_env_enabled();
-            self.add_monitorable_transport_with_debug(transport, debug_enabled)
-                .await
-        }
-
-        #[cfg(not(feature = "transport-debug"))]
-        {
-            // When debug feature is disabled, just add monitorable transport directly
-            self.add_monitorable_transport(transport).await
         }
     }
 
@@ -250,50 +191,73 @@ impl TransportManager {
         results
     }
 
-    /// Start monitoring connection status changes
-    async fn start_status_monitor(&self, device_id: &str) {
-        let monitors = self.monitors.read().await;
+    /// Start status polling for Connected -> Ready transition
+    async fn start_status_polling(&self, device_id: &str) -> Result<()> {
         let device_id_clone = device_id.to_string();
+        let transports = self.transports.clone();
 
-        if let Some(mut rx) = monitors.get(device_id).cloned() {
-            let device_id_for_task = device_id_clone.clone();
+        let task = tokio::spawn(async move {
+            let mut last_status = ConnectionStatus::Connected;
 
-            let task = tokio::spawn(async move {
-                while rx.changed().await.is_ok() {
-                    let status = rx.borrow().clone();
-                    debug!(
-                        "Connection status changed for {}: {}",
-                        device_id_for_task, status
-                    );
+            info!("Starting status polling for transport {}", device_id_clone);
 
-                    match status {
-                        ConnectionStatus::Disconnected => {
-                            warn!("Transport {} disconnected", device_id_for_task);
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+                let transports_read = transports.read().await;
+                if let Some(transport) = transports_read.get(&device_id_clone) {
+                    let status = transport.get_connection_status().await;
+
+                    // Check for status changes
+                    if status != last_status {
+                        match (&last_status, &status) {
+                            (ConnectionStatus::Connected, ConnectionStatus::Ready) => {
+                                info!("Transport {} is now ready", device_id_clone);
+                            }
+                            (ConnectionStatus::Ready, ConnectionStatus::Connected) => {
+                                info!(
+                                    "Transport {} remote disconnected, continuing polling",
+                                    device_id_clone
+                                );
+                            }
+                            (_, ConnectionStatus::Disconnected) => {
+                                warn!(
+                                    "Transport {} disconnected - stopping polling",
+                                    device_id_clone
+                                );
+                                break;
+                            }
+                            (_, ConnectionStatus::Error(ref err)) => {
+                                error!(
+                                    "Transport {} error: {} - stopping polling",
+                                    device_id_clone, err
+                                );
+                                break;
+                            }
+                            _ => {
+                                debug!(
+                                    "Transport {} status changed: {} -> {}",
+                                    device_id_clone, last_status, status
+                                );
+                            }
                         }
-                        ConnectionStatus::Error(ref err) => {
-                            error!("Transport {} error: {}", device_id_for_task, err);
-                        }
-                        ConnectionStatus::Connected => {
-                            info!("Transport {} connected", device_id_for_task);
-                        }
-                        ConnectionStatus::Suspended => {
-                            warn!("Transport {} suspended", device_id_for_task);
-                        }
-                        _ => {}
+                        last_status = status;
                     }
+                } else {
+                    debug!("Transport {} removed - stopping polling", device_id_clone);
+                    break;
                 }
+            }
 
-                debug!(
-                    "Status monitor stopped for transport {}",
-                    device_id_for_task
-                );
-            });
+            debug!("Status polling stopped for transport {}", device_id_clone);
+        });
 
-            self.monitor_tasks
-                .write()
-                .await
-                .insert(device_id_clone, task);
-        }
+        self.monitor_tasks
+            .write()
+            .await
+            .insert(device_id.to_string(), task);
+
+        Ok(())
     }
 
     /// Shutdown all transports
