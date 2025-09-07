@@ -2,10 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-# ADB Server Implementation Guide in Rust
+# DBGIF Server Implementation Guide in Rust
 
 ## Project Overview
-ADB (Android Debug Bridge) 서버를 Rust로 구현하는 프로젝트입니다. ADB 프로토콜 명세에 따라 클라이언트-서버 통신을 처리하며, 인증 과정은 간소화하여 구현합니다.
+ADB (Android Debug Bridge) Protocol을 Base로 하는 DBGIF(Debug Interface) 서버를 Rust로 구현하는 프로젝트입니다. DBGIF 프로토콜 명세에 따라 클라이언트-서버 통신을 처리하며, 인증 과정은 간소화하여 구현합니다.
 
 ## Architecture
 
@@ -20,7 +20,7 @@ ADB (Android Debug Bridge) 서버를 Rust로 구현하는 프로젝트입니다.
 ### 2. Core Protocol Module (`src/protocol/`)
 
 #### message.rs
-- ADB 메시지 구조체 (24바이트 헤더)
+- DBGIF 메시지 구조체 (24바이트 헤더)
 - Command enum 정의:
   - CNXN (0x4e584e43) - 연결
   - AUTH (0x48545541) - 인증 (간소화 처리)
