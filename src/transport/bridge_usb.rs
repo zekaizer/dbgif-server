@@ -16,22 +16,17 @@ const SUPPORTED_BRIDGE_DEVICES: &[(u16, u16)] = &[
     (0x067b, 0x2501), // PL-2501 USB-to-USB Bridge Cable
     (0x067b, 0x2506), // PL-2506 USB Host-to-Host Bridge
     (0x067b, 0x25a1), // PL-25A1 USB-to-USB Network Bridge
-    
-    // ASIX devices  
+    // ASIX devices
     (0x0b95, 0x7720), // AX88772 USB-to-USB Bridge
     (0x0b95, 0x772a), // AX88772A USB-to-USB Network Bridge
     (0x0b95, 0x7e2b), // AX88772B USB-to-USB Bridge
-    
     // ATEN devices
     (0x0557, 0x2009), // UC-2324 USB-to-USB Bridge Cable
     (0x0557, 0x7000), // UC-2322 USB Host-to-Host Bridge
-    
     // Cables Unlimited devices
     (0x0731, 0x2003), // USB-2003 USB Bridge Cable
-    
-    // StarTech devices  
+    // StarTech devices
     (0x067b, 0x3500), // USB3SBRIDGE USB 3.0 Bridge Cable
-    
     // Generic devices
     (0x1234, 0x5678), // Generic USB Bridge Cable (placeholder)
 ];
@@ -42,6 +37,38 @@ const USB_INTERFACE: u8 = 0;
 
 // Timeout for USB operations
 const USB_TIMEOUT: Duration = Duration::from_secs(5);
+
+// PL2501 vendor-specific control commands
+#[derive(Debug, Clone, Copy)]
+enum Pl2501VendorCmd {
+    ClearFeatures = 1,
+    SetFeatures = 3,
+}
+
+// PL2501 feature bit flags
+#[derive(Debug, Clone, Copy)]
+#[repr(u8)]
+pub enum Pl2501Feature {
+    SuspendEn = 1 << 7,  // Suspend enable
+    TxReady = 1 << 5,    // Transmit ready (interrupt only)
+    ResetOut = 1 << 4,   // Reset output pipe
+    ResetIn = 1 << 3,    // Reset input pipe
+    TxComplete = 1 << 2, // Transmission complete
+    TxRequest = 1 << 1,  // Transmission received
+    PeerExists = 1 << 0, // Peer exists
+}
+
+impl Pl2501Feature {
+    const fn as_u8(self) -> u8 {
+        self as u8
+    }
+}
+
+// USB control transfer constants
+const USB_DIR_IN: u8 = 0x80;
+const USB_TYPE_VENDOR: u8 = 0x40;
+const USB_RECIP_DEVICE: u8 = 0x00;
+const USB_CTRL_GET_TIMEOUT: Duration = Duration::from_millis(5000);
 
 /// Bridge USB Transport
 pub struct BridgeUsbTransport {
@@ -54,6 +81,81 @@ pub struct BridgeUsbTransport {
 }
 
 impl BridgeUsbTransport {
+    /// PL2501 vendor request helper
+    fn pl2501_vendor_request(
+        &self,
+        handle: &DeviceHandle<rusb::GlobalContext>,
+        cmd: Pl2501VendorCmd,
+        features: u8,
+    ) -> Result<()> {
+        let request_type = USB_DIR_IN | USB_TYPE_VENDOR | USB_RECIP_DEVICE;
+
+        handle
+            .write_control(
+                request_type,
+                cmd as u8,
+                features as u16,
+                0,
+                &[],
+                USB_CTRL_GET_TIMEOUT,
+            )
+            .context("PL2501 vendor request failed")?;
+
+        debug!(
+            "PL2501 vendor request: cmd={:?}, features=0x{:02x}",
+            cmd, features
+        );
+        Ok(())
+    }
+
+    /// Set PL2501 QuickLink features
+    fn pl2501_set_features(
+        &self,
+        handle: &DeviceHandle<rusb::GlobalContext>,
+        features: u8,
+    ) -> Result<()> {
+        self.pl2501_vendor_request(handle, Pl2501VendorCmd::SetFeatures, features)
+    }
+
+    /// Clear PL2501 QuickLink features
+    fn pl2501_clear_features(
+        &self,
+        handle: &DeviceHandle<rusb::GlobalContext>,
+        features: u8,
+    ) -> Result<()> {
+        self.pl2501_vendor_request(handle, Pl2501VendorCmd::ClearFeatures, features)
+    }
+
+    /// Reset PL2501 pipes (both input and output)
+    fn pl2501_reset_pipes(&self, handle: &DeviceHandle<rusb::GlobalContext>) -> Result<()> {
+        let reset_flags = Pl2501Feature::ResetOut.as_u8() | Pl2501Feature::ResetIn.as_u8();
+        self.pl2501_set_features(handle, reset_flags)
+    }
+
+    /// Full PL2501 reset sequence (as used in Linux driver)
+    fn pl2501_full_reset(&self, handle: &DeviceHandle<rusb::GlobalContext>) -> Result<()> {
+        let reset_flags = Pl2501Feature::SuspendEn.as_u8()
+            | Pl2501Feature::ResetOut.as_u8()
+            | Pl2501Feature::ResetIn.as_u8()
+            | Pl2501Feature::PeerExists.as_u8();
+
+        self.pl2501_set_features(handle, reset_flags)
+            .context("PL2501 full reset failed")
+    }
+
+    /// Enable suspend mode
+    fn pl2501_enable_suspend(&self, handle: &DeviceHandle<rusb::GlobalContext>) -> Result<()> {
+        self.pl2501_set_features(handle, Pl2501Feature::SuspendEn.as_u8())
+    }
+
+    /// Enable peer detection
+    fn pl2501_enable_peer_detection(
+        &self,
+        handle: &DeviceHandle<rusb::GlobalContext>,
+    ) -> Result<()> {
+        self.pl2501_set_features(handle, Pl2501Feature::PeerExists.as_u8())
+    }
+
     /// Create new Bridge USB transport for a device
     pub fn new(device: Device<rusb::GlobalContext>) -> Result<Self> {
         let device_descriptor = device
@@ -123,14 +225,32 @@ impl BridgeUsbTransport {
             device_id, interrupt_endpoint
         );
 
-        Ok(BridgeUsbTransport {
+        // Create transport instance
+        let transport = BridgeUsbTransport {
             device_id,
             handle: Arc::new(Mutex::new(handle)),
             in_endpoint,
             out_endpoint,
             interrupt_endpoint,
-            is_connected: true,
-        })
+            is_connected: false, // Will be set by connect()
+        };
+
+        // Initialize PL2501 with full reset sequence
+        {
+            let handle = transport
+                .handle
+                .try_lock()
+                .context("Failed to lock handle for PL2501 initialization")?;
+            transport
+                .pl2501_full_reset(&*handle)
+                .context("PL2501 initialization failed")?;
+            info!(
+                "PL2501 initialization completed for device {}",
+                transport.device_id
+            );
+        }
+
+        Ok(transport)
     }
 
     /// Send message to USB device (header first, then data)
@@ -267,48 +387,60 @@ impl BridgeUsbTransport {
         Ok(read)
     }
 
-    /// Read connection status from interrupt endpoint
+    /// Read PL2501 feature status (check current feature settings)
+    fn pl2501_read_status(&self, handle: &DeviceHandle<rusb::GlobalContext>) -> Result<u8> {
+        let request_type = USB_DIR_IN | USB_TYPE_VENDOR | USB_RECIP_DEVICE;
+        let mut status_buffer = [0u8; 1];
+
+        let bytes_read = handle
+            .read_control(
+                request_type,
+                0x02, // Hypothetical status read command
+                0,
+                0,
+                &mut status_buffer,
+                USB_CTRL_GET_TIMEOUT,
+            )
+            .context("Failed to read PL2501 status")?;
+
+        if bytes_read == 1 {
+            Ok(status_buffer[0])
+        } else {
+            // Control transfer failed or returned unexpected size, return default
+            Ok(0)
+        }
+    }
+
+    /// Read connection status using PL2501 control transfer
     async fn read_connection_status(&self) -> Result<ConnectionStatus> {
         let handle = self.handle.lock().await;
 
-        let mut status_buffer = [0u8; 4]; // Usually 1-4 bytes for status
-
-        match handle.read_interrupt(
-            self.interrupt_endpoint,
-            &mut status_buffer,
-            Duration::from_millis(100), // Short timeout for polling
-        ) {
-            Ok(bytes_read) => {
-                if bytes_read == 0 {
-                    return Ok(ConnectionStatus::Disconnected);
-                }
-
-                // Parse status packet (vendor-specific format)
-                // This is a simplified interpretation - real implementation would
-                // depend on the actual bridge cable's status packet format
-                let status_byte = status_buffer[0];
-
-                match status_byte {
-                    0x00 => Ok(ConnectionStatus::Disconnected),
-                    0x01 => Ok(ConnectionStatus::Ready),
-                    0xFF => Ok(ConnectionStatus::Error("Bridge cable error".to_string())),
-                    _ => {
-                        debug!("Unknown bridge status byte: 0x{:02x}", status_byte);
-                        Ok(ConnectionStatus::Disconnected) // Assume disconnected for safety
-                    }
-                }
-            }
-            Err(rusb::Error::Timeout) => {
-                // Timeout is normal for polling - assume remote still disconnected
-                Ok(ConnectionStatus::Disconnected)
-            }
+        // Read PL2501 status via control transfer
+        let status_byte = match self.pl2501_read_status(&*handle) {
+            Ok(status) => status,
             Err(e) => {
-                warn!("Failed to read bridge connection status: {}", e);
-                Ok(ConnectionStatus::Error(format!(
+                return Ok(ConnectionStatus::Error(format!(
                     "Status read failed: {}",
                     e
-                )))
+                )));
             }
+        };
+
+        // Parse PL2501 feature status byte - only check PEER_EXISTS
+        if status_byte & Pl2501Feature::PeerExists.as_u8() != 0 {
+            Ok(ConnectionStatus::Connected) // Peer is connected
+        } else {
+            Ok(ConnectionStatus::Disconnected) // No peer detected
+        }
+    }
+
+    /// Check if peer is connected using PL2501 PEER_E bit
+    async fn pl2501_is_peer_connected(&self) -> bool {
+        let handle = self.handle.lock().await;
+
+        match self.pl2501_read_status(&*handle) {
+            Ok(status) => (status & Pl2501Feature::PeerExists.as_u8()) != 0,
+            Err(_) => false,
         }
     }
 }
@@ -324,43 +456,52 @@ impl Transport for BridgeUsbTransport {
     }
 
     async fn connect(&mut self) -> Result<()> {
-        // Stage 1: USB connection is already established (done in constructor)
         info!(
-            "Bridge USB device {} physically connected, checking remote connection...",
+            "Bridge USB device {} connecting, checking remote connection...",
             self.device_id
         );
 
+        // Re-initialize PL2501 to ensure proper state
+        {
+            let handle = self.handle.lock().await;
+            if let Err(e) = self.pl2501_full_reset(&*handle) {
+                warn!("PL2501 reset during connect failed: {}", e);
+                // Continue anyway, maybe it was already initialized
+            }
+
+            // Ensure peer detection is enabled
+            if let Err(e) = self.pl2501_enable_peer_detection(&*handle) {
+                warn!("PL2501 peer detection enable failed: {}", e);
+            }
+        }
+
         // Check current remote status and set connection state accordingly
         match self.read_connection_status().await {
-            Ok(ConnectionStatus::Ready) => {
-                // Both USB and remote are connected - ready for communication
+            Ok(ConnectionStatus::Connected) => {
                 self.is_connected = true;
                 info!(
-                    "Bridge USB device {} ready (remote already connected)",
+                    "Bridge USB device {} connected (remote connected)",
                     self.device_id
                 );
             }
             Ok(ConnectionStatus::Disconnected) => {
-                // USB connected but remote disconnected - connected but not ready
                 self.is_connected = false;
                 info!(
-                    "Bridge USB device {} connected (waiting for remote)",
+                    "Bridge USB device {} waiting (remote not connected)",
                     self.device_id
                 );
             }
             Ok(status) => {
-                // Other status (Error) - not ready
                 self.is_connected = false;
                 info!(
-                    "Bridge USB device {} connected, remote status: {}",
+                    "Bridge USB device {} error status: {}",
                     self.device_id, status
                 );
             }
             Err(e) => {
-                // Cannot determine remote status - connected with error info
                 self.is_connected = false;
                 warn!(
-                    "Bridge USB device {} connected, remote status unknown: {}",
+                    "Bridge USB device {} status check failed: {}",
                     self.device_id, e
                 );
             }
@@ -390,16 +531,27 @@ impl Transport for BridgeUsbTransport {
     }
 
     async fn health_check(&self) -> Result<()> {
-        if !self.is_connected {
-            return Err(anyhow::anyhow!(
-                "Bridge USB device {} is disconnected",
-                self.device_id
-            ));
-        }
-
-        // Check actual connection status via interrupt endpoint
+        // Always check actual status, don't rely on cached is_connected flag
         match self.read_connection_status().await? {
-            ConnectionStatus::Ready => Ok(()),
+            ConnectionStatus::Connected => {
+                debug!("Bridge USB device {} health check passed", self.device_id);
+                Ok(())
+            }
+            ConnectionStatus::Disconnected => {
+                // Try to recover by re-enabling peer detection
+                let handle = self.handle.lock().await;
+                if let Err(e) = self.pl2501_enable_peer_detection(&*handle) {
+                    warn!(
+                        "Failed to re-enable peer detection during health check: {}",
+                        e
+                    );
+                }
+
+                Err(anyhow::anyhow!(
+                    "Bridge USB device {} health check failed: remote disconnected",
+                    self.device_id
+                ))
+            }
             status => Err(anyhow::anyhow!(
                 "Bridge USB device {} health check failed: {}",
                 self.device_id,
@@ -453,17 +605,17 @@ impl UsbTransportFactory for BridgeUsbFactory {
 
     fn validate_device(&self, device: &Device<rusb::GlobalContext>) -> Result<()> {
         let descriptor = device.device_descriptor()?;
-        
+
         // Additional validation for Bridge devices
         // Check for required endpoints (Bulk IN/OUT + Interrupt IN)
         let config_descriptor = device.config_descriptor(0)?;
-        
+
         for interface in config_descriptor.interfaces() {
             for interface_descriptor in interface.descriptors() {
                 let mut has_bulk_in = false;
                 let mut has_bulk_out = false;
                 let mut has_interrupt_in = false;
-                
+
                 for endpoint in interface_descriptor.endpoint_descriptors() {
                     match endpoint.transfer_type() {
                         rusb::TransferType::Bulk => match endpoint.direction() {
@@ -478,13 +630,13 @@ impl UsbTransportFactory for BridgeUsbFactory {
                         _ => {}
                     }
                 }
-                
+
                 if has_bulk_in && has_bulk_out && has_interrupt_in {
                     return Ok(());
                 }
             }
         }
-        
+
         // If required endpoints not found, still allow if VID/PID matches
         debug!(
             "Bridge device VID={:04x} PID={:04x} doesn't have required endpoints, but VID/PID matches",
@@ -527,7 +679,7 @@ mod tests {
         let factory = BridgeUsbFactory::new();
         assert_eq!(factory.name(), "BridgeUSB");
         assert!(!factory.supported_devices().is_empty());
-        
+
         // Test Prolific PL-2501 VID/PID matching
         let prolific_info = UsbDeviceInfo {
             vendor_id: 0x067b,
@@ -537,7 +689,7 @@ mod tests {
             serial: Some("bridge_test".to_string()),
         };
         assert!(factory.matches(&prolific_info));
-        
+
         // Test non-matching device
         let unknown_info = UsbDeviceInfo {
             vendor_id: 0xffff,
@@ -547,5 +699,44 @@ mod tests {
             serial: None,
         };
         assert!(!factory.matches(&unknown_info));
+    }
+
+    #[test]
+    fn test_pl2501_feature_bits() {
+        // Test feature bit values match documentation
+        assert_eq!(Pl2501Feature::SuspendEn.as_u8(), 0x80);
+        assert_eq!(Pl2501Feature::TxReady.as_u8(), 0x20);
+        assert_eq!(Pl2501Feature::ResetOut.as_u8(), 0x10);
+        assert_eq!(Pl2501Feature::ResetIn.as_u8(), 0x08);
+        assert_eq!(Pl2501Feature::TxComplete.as_u8(), 0x04);
+        assert_eq!(Pl2501Feature::TxRequest.as_u8(), 0x02);
+        assert_eq!(Pl2501Feature::PeerExists.as_u8(), 0x01);
+
+        // Test combined flags
+        let reset_flags = Pl2501Feature::ResetOut.as_u8() | Pl2501Feature::ResetIn.as_u8();
+        assert_eq!(reset_flags, 0x18);
+
+        let full_reset = Pl2501Feature::SuspendEn.as_u8()
+            | Pl2501Feature::ResetOut.as_u8()
+            | Pl2501Feature::ResetIn.as_u8()
+            | Pl2501Feature::PeerExists.as_u8();
+        assert_eq!(full_reset, 0x99); // 0x80 | 0x10 | 0x08 | 0x01
+    }
+
+    #[test]
+    fn test_pl2501_vendor_commands() {
+        assert_eq!(Pl2501VendorCmd::ClearFeatures as u8, 1);
+        assert_eq!(Pl2501VendorCmd::SetFeatures as u8, 3);
+    }
+
+    #[test]
+    fn test_usb_control_constants() {
+        assert_eq!(USB_DIR_IN, 0x80);
+        assert_eq!(USB_TYPE_VENDOR, 0x40);
+        assert_eq!(USB_RECIP_DEVICE, 0x00);
+
+        // Test combined request type for vendor requests
+        let request_type = USB_DIR_IN | USB_TYPE_VENDOR | USB_RECIP_DEVICE;
+        assert_eq!(request_type, 0xC0);
     }
 }
