@@ -10,6 +10,8 @@ pub enum Command {
     Write,
     Close,
     Auth,
+    Ping,
+    Pong,
 }
 
 impl Command {
@@ -21,6 +23,8 @@ impl Command {
             Command::Write => WRTE,
             Command::Close => CLSE,
             Command::Auth => AUTH,
+            Command::Ping => PING,
+            Command::Pong => PONG,
         }
     }
 
@@ -32,6 +36,8 @@ impl Command {
             WRTE => Ok(Command::Write),
             CLSE => Ok(Command::Close),
             AUTH => Ok(Command::Auth),
+            PING => Ok(Command::Ping),
+            PONG => Ok(Command::Pong),
             _ => bail!("Unknown command: 0x{:08x}", value),
         }
     }
@@ -44,6 +50,8 @@ impl Command {
             Command::Write => WRTE_MAGIC,
             Command::Close => CLSE_MAGIC,
             Command::Auth => AUTH_MAGIC,
+            Command::Ping => PING_MAGIC,
+            Command::Pong => PONG_MAGIC,
         }
     }
 }
@@ -178,5 +186,34 @@ mod tests {
     fn test_invalid_command() {
         let result = Command::from_u32(0xdeadbeef);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_ping_pong_commands() {
+        // Test PING command
+        assert_eq!(Command::Ping.to_u32(), PING);
+        assert_eq!(Command::from_u32(PING).unwrap(), Command::Ping);
+        assert_eq!(Command::Ping.magic(), PING_MAGIC);
+
+        // Test PONG command
+        assert_eq!(Command::Pong.to_u32(), PONG);
+        assert_eq!(Command::from_u32(PONG).unwrap(), Command::Pong);
+        assert_eq!(Command::Pong.magic(), PONG_MAGIC);
+    }
+
+    #[test]
+    fn test_ping_pong_messages() {
+        // Test PING message
+        let ping_msg = Message::new(Command::Ping, 0, 0, Bytes::new());
+        let serialized = ping_msg.serialize();
+        let deserialized = Message::deserialize(&serialized[..]).unwrap();
+        assert_eq!(deserialized.command, Command::Ping);
+
+        // Test PONG message
+        let pong_msg = Message::new(Command::Pong, 1, 2, &b"keepalive"[..]);
+        let serialized = pong_msg.serialize();
+        let deserialized = Message::deserialize(&serialized[..]).unwrap();
+        assert_eq!(deserialized.command, Command::Pong);
+        assert_eq!(deserialized.data, Bytes::from(&b"keepalive"[..]));
     }
 }

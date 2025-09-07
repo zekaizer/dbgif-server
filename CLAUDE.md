@@ -1,3 +1,7 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
 # ADB Server Implementation Guide in Rust
 
 ## Project Overview
@@ -24,6 +28,8 @@ ADB (Android Debug Bridge) 서버를 Rust로 구현하는 프로젝트입니다.
   - OKAY (0x59414b4f) - 확인 응답
   - WRTE (0x45545257) - 데이터 전송
   - CLSE (0x45534c43) - 스트림 종료
+  - Ping (PING: 0x474e4950) - Keep-alive
+  - Pong (PONG: 0x474e4f50) - Keep-alive 응답
 - 메시지 직렬화/역직렬화
 - Magic value 검증 (command의 비트 NOT 연산)
 
