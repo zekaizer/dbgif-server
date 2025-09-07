@@ -1,4 +1,4 @@
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum HostCommand {
@@ -20,9 +20,9 @@ impl HostCommand {
         if !service.starts_with("host:") {
             bail!("Not a host command: {}", service);
         }
-        
+
         let command_part = &service[5..]; // Remove "host:" prefix
-        
+
         match command_part {
             "devices" => Ok(Self::Devices),
             "devices-l" => Ok(Self::DevicesLong),
@@ -45,7 +45,7 @@ impl HostCommand {
     pub fn to_service_string(&self) -> String {
         match self {
             Self::Devices => "host:devices".to_string(),
-            Self::DevicesLong => "host:devices-l".to_string(), 
+            Self::DevicesLong => "host:devices-l".to_string(),
             Self::TrackDevices => "host:track-devices".to_string(),
             Self::TransportAny => "host:transport-any".to_string(),
             Self::Transport(serial) => format!("host:transport:{}", serial),

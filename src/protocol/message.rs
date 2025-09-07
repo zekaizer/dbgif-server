@@ -1,6 +1,6 @@
-use bytes::{Buf, BufMut, Bytes, BytesMut};
-use anyhow::{Result, bail};
 use super::constants::*;
+use anyhow::{bail, Result};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
@@ -76,7 +76,7 @@ impl Message {
 
     pub fn serialize(&self) -> Bytes {
         let mut buf = BytesMut::with_capacity(24 + self.data.len());
-        
+
         // Header (24 bytes)
         buf.put_u32_le(self.command.to_u32());
         buf.put_u32_le(self.arg0);
@@ -84,10 +84,10 @@ impl Message {
         buf.put_u32_le(self.data.len() as u32);
         buf.put_u32_le(self.checksum());
         buf.put_u32_le(self.command.magic());
-        
+
         // Data payload
         buf.extend_from_slice(&self.data);
-        
+
         buf.freeze()
     }
 
@@ -104,17 +104,23 @@ impl Message {
         let magic = data.get_u32_le();
 
         let command = Command::from_u32(command_raw)?;
-        
+
         // Verify magic value
         if magic != command.magic() {
-            bail!("Invalid magic value: expected 0x{:08x}, got 0x{:08x}", 
-                  command.magic(), magic);
+            bail!(
+                "Invalid magic value: expected 0x{:08x}, got 0x{:08x}",
+                command.magic(),
+                magic
+            );
         }
 
         // Read payload data
         if data.remaining() < data_length as usize {
-            bail!("Insufficient data: expected {} bytes, got {}", 
-                  data_length, data.remaining());
+            bail!(
+                "Insufficient data: expected {} bytes, got {}",
+                data_length,
+                data.remaining()
+            );
         }
 
         let mut payload = vec![0u8; data_length as usize];
@@ -130,8 +136,11 @@ impl Message {
 
         // Verify checksum
         if message.checksum() != data_checksum {
-            bail!("Checksum mismatch: expected 0x{:08x}, got 0x{:08x}", 
-                  message.checksum(), data_checksum);
+            bail!(
+                "Checksum mismatch: expected 0x{:08x}, got 0x{:08x}",
+                message.checksum(),
+                data_checksum
+            );
         }
 
         Ok(message)
@@ -156,25 +165,25 @@ impl Message {
     /// Generate detailed debug information including raw bytes
     pub fn debug_raw(&self) -> String {
         use crate::utils::hex_dump::hex_dump_string;
-        
+
         let raw = self.serialize();
         let mut output = self.debug_format();
-        
+
         output.push_str("\nHeader (24 bytes):\n");
         output.push_str(&hex_dump_string("Header", &raw[..24], Some(24)));
-        
+
         if !self.data.is_empty() {
             output.push_str("\nData payload:\n");
             output.push_str(&hex_dump_string("Payload", &self.data, Some(256)));
         }
-        
+
         output
     }
 
     /// Get compact representation for logging
     pub fn debug_compact(&self) -> String {
         use crate::utils::hex_dump::format_bytes_inline;
-        
+
         let raw = self.serialize();
         format!(
             "{:?}(0x{:08X}) [{} bytes] {}",
@@ -206,9 +215,9 @@ mod tests {
     fn test_message_serialization() {
         let msg = Message::new(Command::Connect, 0x01000000, 0x00040000, &b"test"[..]);
         let serialized = msg.serialize();
-        
+
         assert_eq!(serialized.len(), 24 + 4); // header + data
-        
+
         let deserialized = Message::deserialize(&serialized[..]).unwrap();
         assert_eq!(deserialized.command, Command::Connect);
         assert_eq!(deserialized.arg0, 0x01000000);
@@ -221,7 +230,7 @@ mod tests {
         let msg = Message::new(Command::Okay, 1, 2, Bytes::new());
         let serialized = msg.serialize();
         let deserialized = Message::deserialize(&serialized[..]).unwrap();
-        
+
         assert_eq!(deserialized.command, Command::Okay);
         assert_eq!(deserialized.data.len(), 0);
     }

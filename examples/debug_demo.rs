@@ -1,20 +1,17 @@
 /// Debug functionality demonstration
-/// 
+///
 /// This example shows how to use the DebugTransport wrapper to debug
 /// raw protocol messages in different transport implementations.
-
 use dbgif_server::{
-    transport::{TcpTransport, DebugTransport, TransportManager},
-    protocol::{Message, Command},
+    protocol::{Command, Message},
+    transport::{DebugTransport, TcpTransport, TransportManager},
     utils::hex_dump,
 };
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Initialize tracing
-    tracing_subscriber::fmt()
-        .with_env_filter("debug")
-        .init();
+    tracing_subscriber::fmt().with_env_filter("debug").init();
 
     println!("=== DBGIF Transport Debug Demo ===\n");
 
@@ -30,9 +27,9 @@ async fn main() -> anyhow::Result<()> {
         Command::Connect,
         0x01000000,
         0x00100000,
-        "host::dbgif_server\0"
+        "host::dbgif_server\0",
     );
-    
+
     println!("Debug format: {}", test_message.debug_format());
     println!("Compact format: {}", test_message.debug_compact());
     println!();
@@ -44,16 +41,20 @@ async fn main() -> anyhow::Result<()> {
 
     // Demo 4: Environment-based debug detection
     println!("4. Environment Debug Detection:");
-    println!("DBGIF_DEBUG environment variable: {}", 
-        std::env::var("DBGIF_DEBUG").unwrap_or("(not set)".to_string()));
-    println!("Debug auto-enabled: {}", 
-        dbgif_server::transport::is_debug_env_enabled());
+    println!(
+        "DBGIF_DEBUG environment variable: {}",
+        std::env::var("DBGIF_DEBUG").unwrap_or("(not set)".to_string())
+    );
+    println!(
+        "Debug auto-enabled: {}",
+        dbgif_server::transport::is_debug_env_enabled()
+    );
     println!();
 
     // Demo 5: TransportManager with debug
     println!("5. TransportManager Debug Integration:");
     let manager = TransportManager::new();
-    
+
     // This would normally create a real transport
     println!("- Manager created with debug integration support");
     println!("- Use add_transport_with_debug() or add_transport_auto_debug()");

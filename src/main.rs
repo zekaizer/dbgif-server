@@ -1,7 +1,7 @@
 use anyhow::Result;
-use tracing::{info, error};
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use tokio::signal;
+use tracing::{error, info};
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use dbgif_server::server::DbgifServer;
 
@@ -19,7 +19,7 @@ async fn main() -> Result<()> {
     info!("Starting dbgif server...");
 
     let mut server = DbgifServer::new();
-    
+
     // Bind to default port (5037)
     if let Err(e) = server.bind(None).await {
         error!("Failed to bind server: {}", e);

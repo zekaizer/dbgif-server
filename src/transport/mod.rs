@@ -1,7 +1,7 @@
-use std::fmt;
-use async_trait::async_trait;
-use tokio::sync::watch;
 use anyhow::Result;
+use async_trait::async_trait;
+use std::fmt;
+use tokio::sync::watch;
 
 use crate::protocol::message::Message;
 
@@ -47,14 +47,14 @@ impl fmt::Display for ConnectionStatus {
 pub trait Transport: Send + Sync {
     async fn send_message(&mut self, message: &Message) -> Result<()>;
     async fn receive_message(&mut self) -> Result<Message>;
-    
+
     async fn connect(&mut self) -> Result<()>;
     async fn disconnect(&mut self) -> Result<()>;
     async fn is_connected(&self) -> bool;
-    
+
     fn device_id(&self) -> &str;
     fn transport_type(&self) -> TransportType;
-    
+
     async fn health_check(&self) -> Result<()> {
         if self.is_connected().await {
             Ok(())
@@ -69,24 +69,24 @@ pub trait MonitorableTransport: Transport {
     async fn start_monitoring(&mut self) -> Result<watch::Receiver<ConnectionStatus>>;
     async fn stop_monitoring(&mut self) -> Result<()>;
     async fn get_connection_status(&self) -> ConnectionStatus;
-    
+
     fn supports_hotplug(&self) -> bool {
         false
     }
-    
+
     fn supports_reconnection(&self) -> bool {
         true
     }
 }
 
-pub mod tcp;
 pub mod android_usb;
 pub mod bridge_usb;
-pub mod manager;
 pub mod debug;
+pub mod manager;
+pub mod tcp;
 
-pub use tcp::*;
 pub use android_usb::*;
 pub use bridge_usb::*;
+pub use debug::{is_debug_env_enabled, DebugTransport};
 pub use manager::*;
-pub use debug::{DebugTransport, is_debug_env_enabled};
+pub use tcp::*;

@@ -1,11 +1,11 @@
+use anyhow::Result;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
-use tracing::{info, error, debug};
-use anyhow::Result;
+use tracing::{debug, error, info};
 
-use crate::protocol::constants::DEFAULT_PORT;
 use super::client_handler::ClientHandler;
+use crate::protocol::constants::DEFAULT_PORT;
 use crate::transport::tcp::TcpTransport;
 use crate::transport::{Transport, TransportManager};
 
@@ -32,18 +32,20 @@ impl DbgifServer {
     pub async fn bind(&mut self, port: Option<u16>) -> Result<()> {
         let bind_port = port.unwrap_or(DEFAULT_PORT);
         let bind_address = format!("127.0.0.1:{}", bind_port);
-        
+
         info!("Binding dbgif server to {}", bind_address);
-        
+
         let listener = TcpListener::bind(&bind_address).await?;
         self.listener = Some(listener);
-        
+
         info!("dbgif server listening on {}", bind_address);
         Ok(())
     }
 
     pub async fn run(&self) -> Result<()> {
-        let listener = self.listener.as_ref()
+        let listener = self
+            .listener
+            .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Server not bound. Call bind() first"))?;
 
         loop {
@@ -56,13 +58,15 @@ impl DbgifServer {
                     };
 
                     info!("New client connected: {} (client_id: {})", addr, client_id);
-                    
+
                     let transport_manager = self.transport_manager.clone();
                     tokio::spawn(async move {
-                        let tcp_transport = TcpTransport::new(format!("tcp_client_{}", client_id), stream);
+                        let tcp_transport =
+                            TcpTransport::new(format!("tcp_client_{}", client_id), stream);
                         let transport: Box<dyn Transport + Send> = Box::new(tcp_transport);
-                        let mut handler = ClientHandler::new(client_id, transport, transport_manager);
-                        
+                        let mut handler =
+                            ClientHandler::new(client_id, transport, transport_manager);
+
                         if let Err(e) = handler.handle().await {
                             error!("Client {} disconnected with error: {}", client_id, e);
                         } else {

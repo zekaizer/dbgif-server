@@ -1,12 +1,12 @@
-use std::collections::HashMap;
-use tokio::sync::{RwLock, watch};
-use tokio::task::JoinHandle;
-use tracing::{info, warn, debug, error};
 use anyhow::Result;
+use std::collections::HashMap;
+use tokio::sync::{watch, RwLock};
+use tokio::task::JoinHandle;
+use tracing::{debug, error, info, warn};
 
+use super::debug::{is_debug_env_enabled, DebugTransport};
+use super::{ConnectionStatus, MonitorableTransport, Transport, TransportType};
 use crate::protocol::message::Message;
-use super::{Transport, MonitorableTransport, TransportType, ConnectionStatus};
-use super::debug::{DebugTransport, is_debug_env_enabled};
 
 /// Unified manager for all transport types
 pub struct TransportManager {
@@ -29,19 +29,26 @@ impl TransportManager {
     pub async fn add_transport(&self, mut transport: Box<dyn Transport + Send>) -> Result<String> {
         let device_id = transport.device_id().to_string();
         let transport_type = transport.transport_type();
-        
+
         // Initialize connection
         transport.connect().await?;
-        
+
         // Add transport to collection
-        self.transports.write().await.insert(device_id.clone(), transport);
-        
+        self.transports
+            .write()
+            .await
+            .insert(device_id.clone(), transport);
+
         info!("Added {} transport: {}", transport_type, device_id);
         Ok(device_id)
     }
 
     /// Add a transport with optional debug wrapping
-    pub async fn add_transport_with_debug(&self, transport: Box<dyn Transport + Send>, enable_debug: bool) -> Result<String> {
+    pub async fn add_transport_with_debug(
+        &self,
+        transport: Box<dyn Transport + Send>,
+        enable_debug: bool,
+    ) -> Result<String> {
         if enable_debug {
             let debug_transport = DebugTransport::with_debug(transport, true);
             self.add_transport(Box::new(debug_transport)).await
@@ -52,13 +59,17 @@ impl TransportManager {
 
     /// Add transport with debug automatically enabled based on environment
     #[inline]
-    pub async fn add_transport_auto_debug(&self, transport: Box<dyn Transport + Send>) -> Result<String> {
+    pub async fn add_transport_auto_debug(
+        &self,
+        transport: Box<dyn Transport + Send>,
+    ) -> Result<String> {
         #[cfg(feature = "transport-debug")]
         {
             let debug_enabled = is_debug_env_enabled();
-            self.add_transport_with_debug(transport, debug_enabled).await
+            self.add_transport_with_debug(transport, debug_enabled)
+                .await
         }
-        
+
         #[cfg(not(feature = "transport-debug"))]
         {
             // When debug feature is disabled, just add transport directly
@@ -67,35 +78,51 @@ impl TransportManager {
     }
 
     /// Add a monitorable transport with status monitoring
-    pub async fn add_monitorable_transport(&self, mut transport: Box<dyn MonitorableTransport + Send>) -> Result<String> {
+    pub async fn add_monitorable_transport(
+        &self,
+        mut transport: Box<dyn MonitorableTransport + Send>,
+    ) -> Result<String> {
         let device_id = transport.device_id().to_string();
         let transport_type = transport.transport_type();
-        
+
         // Initialize connection
         transport.connect().await?;
-        
+
         // Start monitoring
         match transport.start_monitoring().await {
             Ok(rx) => {
                 self.monitors.write().await.insert(device_id.clone(), rx);
                 self.start_status_monitor(&device_id).await;
-                info!("Started monitoring for {} transport: {}", transport_type, device_id);
+                info!(
+                    "Started monitoring for {} transport: {}",
+                    transport_type, device_id
+                );
             }
             Err(e) => {
                 warn!("Failed to start monitoring for {}: {}", device_id, e);
             }
         }
-        
+
         // Add transport to collection (upcast to Transport trait)
         let transport_boxed: Box<dyn Transport + Send> = transport;
-        self.transports.write().await.insert(device_id.clone(), transport_boxed);
-        
-        info!("Added monitored {} transport: {}", transport_type, device_id);
+        self.transports
+            .write()
+            .await
+            .insert(device_id.clone(), transport_boxed);
+
+        info!(
+            "Added monitored {} transport: {}",
+            transport_type, device_id
+        );
         Ok(device_id)
     }
 
     /// Add a monitorable transport with optional debug wrapping
-    pub async fn add_monitorable_transport_with_debug(&self, transport: Box<dyn MonitorableTransport + Send>, enable_debug: bool) -> Result<String> {
+    pub async fn add_monitorable_transport_with_debug(
+        &self,
+        transport: Box<dyn MonitorableTransport + Send>,
+        enable_debug: bool,
+    ) -> Result<String> {
         if enable_debug {
             // For now, monitorable transports don't support debug wrapping in the simplified version
             // Just add the transport directly
@@ -108,13 +135,17 @@ impl TransportManager {
 
     /// Add monitorable transport with debug automatically enabled based on environment
     #[inline]
-    pub async fn add_monitorable_transport_auto_debug(&self, transport: Box<dyn MonitorableTransport + Send>) -> Result<String> {
+    pub async fn add_monitorable_transport_auto_debug(
+        &self,
+        transport: Box<dyn MonitorableTransport + Send>,
+    ) -> Result<String> {
         #[cfg(feature = "transport-debug")]
         {
             let debug_enabled = is_debug_env_enabled();
-            self.add_monitorable_transport_with_debug(transport, debug_enabled).await
+            self.add_monitorable_transport_with_debug(transport, debug_enabled)
+                .await
         }
-        
+
         #[cfg(not(feature = "transport-debug"))]
         {
             // When debug feature is disabled, just add monitorable transport directly
@@ -143,14 +174,12 @@ impl TransportManager {
     /// Send message to specific transport
     pub async fn send_message(&self, device_id: &str, message: &Message) -> Result<()> {
         let mut transports = self.transports.write().await;
-        
+
         match transports.get_mut(device_id) {
-            Some(transport) => {
-                transport.send_message(message).await.map_err(|e| {
-                    error!("Failed to send message to {}: {}", device_id, e);
-                    e
-                })
-            }
+            Some(transport) => transport.send_message(message).await.map_err(|e| {
+                error!("Failed to send message to {}: {}", device_id, e);
+                e
+            }),
             None => Err(anyhow::anyhow!("Transport not found: {}", device_id)),
         }
     }
@@ -158,14 +187,12 @@ impl TransportManager {
     /// Receive message from specific transport
     pub async fn receive_message(&self, device_id: &str) -> Result<Message> {
         let mut transports = self.transports.write().await;
-        
+
         match transports.get_mut(device_id) {
-            Some(transport) => {
-                transport.receive_message().await.map_err(|e| {
-                    error!("Failed to receive message from {}: {}", device_id, e);
-                    e
-                })
-            }
+            Some(transport) => transport.receive_message().await.map_err(|e| {
+                error!("Failed to receive message from {}: {}", device_id, e);
+                e
+            }),
             None => Err(anyhow::anyhow!("Transport not found: {}", device_id)),
         }
     }
@@ -178,9 +205,12 @@ impl TransportManager {
     /// Get transport information
     pub async fn get_transport_info(&self, device_id: &str) -> Option<(TransportType, bool)> {
         let transports = self.transports.read().await;
-        
+
         transports.get(device_id).map(|transport| {
-            (transport.transport_type(), futures::executor::block_on(transport.is_connected()))
+            (
+                transport.transport_type(),
+                futures::executor::block_on(transport.is_connected()),
+            )
         })
     }
 
@@ -188,19 +218,19 @@ impl TransportManager {
     pub async fn get_all_transport_info(&self) -> HashMap<String, (TransportType, bool)> {
         let transports = self.transports.read().await;
         let mut info = HashMap::new();
-        
+
         for (id, transport) in transports.iter() {
             let connected = futures::executor::block_on(transport.is_connected());
             info.insert(id.clone(), (transport.transport_type(), connected));
         }
-        
+
         info
     }
 
     /// Get connection status for monitored transport
     pub async fn get_connection_status(&self, device_id: &str) -> Option<ConnectionStatus> {
         let monitors = self.monitors.read().await;
-        
+
         monitors.get(device_id).map(|rx| rx.borrow().clone())
     }
 
@@ -208,7 +238,7 @@ impl TransportManager {
     pub async fn health_check(&self) -> HashMap<String, Result<(), String>> {
         let transports = self.transports.read().await;
         let mut results = HashMap::new();
-        
+
         for (id, transport) in transports.iter() {
             let result = match transport.health_check().await {
                 Ok(_) => Ok(()),
@@ -216,7 +246,7 @@ impl TransportManager {
             };
             results.insert(id.clone(), result);
         }
-        
+
         results
     }
 
@@ -224,15 +254,18 @@ impl TransportManager {
     async fn start_status_monitor(&self, device_id: &str) {
         let monitors = self.monitors.read().await;
         let device_id_clone = device_id.to_string();
-        
+
         if let Some(mut rx) = monitors.get(device_id).cloned() {
             let device_id_for_task = device_id_clone.clone();
-            
+
             let task = tokio::spawn(async move {
                 while rx.changed().await.is_ok() {
                     let status = rx.borrow().clone();
-                    debug!("Connection status changed for {}: {}", device_id_for_task, status);
-                    
+                    debug!(
+                        "Connection status changed for {}: {}",
+                        device_id_for_task, status
+                    );
+
                     match status {
                         ConnectionStatus::Disconnected => {
                             warn!("Transport {} disconnected", device_id_for_task);
@@ -249,36 +282,42 @@ impl TransportManager {
                         _ => {}
                     }
                 }
-                
-                debug!("Status monitor stopped for transport {}", device_id_for_task);
+
+                debug!(
+                    "Status monitor stopped for transport {}",
+                    device_id_for_task
+                );
             });
-            
-            self.monitor_tasks.write().await.insert(device_id_clone, task);
+
+            self.monitor_tasks
+                .write()
+                .await
+                .insert(device_id_clone, task);
         }
     }
 
     /// Shutdown all transports
     pub async fn shutdown(&self) -> Result<()> {
         info!("Shutting down transport manager");
-        
+
         // Stop all monitoring tasks
         let mut monitor_tasks = self.monitor_tasks.write().await;
         for (_, task) in monitor_tasks.drain() {
             task.abort();
         }
-        
+
         // Disconnect all transports
         let mut transports = self.transports.write().await;
         let mut errors = Vec::new();
-        
+
         for (device_id, mut transport) in transports.drain() {
             if let Err(e) = transport.disconnect().await {
                 errors.push(format!("Failed to disconnect {}: {}", device_id, e));
             }
         }
-        
+
         self.monitors.write().await.clear();
-        
+
         if errors.is_empty() {
             info!("Transport manager shutdown complete");
             Ok(())
@@ -293,7 +332,6 @@ impl Default for TransportManager {
         Self::new()
     }
 }
-
 
 #[cfg(test)]
 mod tests {

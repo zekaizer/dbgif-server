@@ -1,17 +1,17 @@
+use anyhow::Result;
 /// Simplified debug implementation with better feature flag support
 use async_trait::async_trait;
-use anyhow::Result;
 
-use crate::protocol::Message;
 use super::{Transport, TransportType};
+use crate::protocol::Message;
 
 #[cfg(feature = "transport-debug")]
 mod debug_enabled {
     use super::*;
+    use crate::utils::hex_dump::{format_bytes_inline, hex_dump_string};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
-    use tracing::{debug, trace, info};
-    use crate::utils::hex_dump::{hex_dump_string, format_bytes_inline};
+    use tracing::{debug, info, trace};
 
     /// Debug wrapper with full functionality
     pub struct DebugTransport {
@@ -63,7 +63,7 @@ mod debug_enabled {
             }
 
             let raw_data = message.serialize();
-            
+
             debug!(
                 "{} [{}] {} - {} bytes: cmd={:?}(0x{:08X}) arg0=0x{:08X} arg1=0x{:08X} data_len={}",
                 direction,
@@ -78,13 +78,27 @@ mod debug_enabled {
             );
 
             if raw_data.len() <= 64 {
-                debug!("{} [{}] Raw: {}", direction, self.device_id, format_bytes_inline(&raw_data, Some(32)));
+                debug!(
+                    "{} [{}] Raw: {}",
+                    direction,
+                    self.device_id,
+                    format_bytes_inline(&raw_data, Some(32))
+                );
             } else {
-                debug!("{} [{}] Raw (first 32 bytes): {}", direction, self.device_id, format_bytes_inline(&raw_data, Some(32)));
+                debug!(
+                    "{} [{}] Raw (first 32 bytes): {}",
+                    direction,
+                    self.device_id,
+                    format_bytes_inline(&raw_data, Some(32))
+                );
             }
 
             if tracing::enabled!(tracing::Level::TRACE) {
-                let hex_dump = hex_dump_string(&format!("{} [{}]", direction, self.device_id), &raw_data, Some(256));
+                let hex_dump = hex_dump_string(
+                    &format!("{} [{}]", direction, self.device_id),
+                    &raw_data,
+                    Some(256),
+                );
                 trace!("\n{}", hex_dump);
             }
         }
@@ -97,23 +111,23 @@ mod debug_enabled {
             if self.is_debug_enabled() {
                 self.log_raw_message("TX", message);
             }
-            
+
             let result = self.inner.send_message(message).await;
-            
+
             if self.is_debug_enabled() {
                 match &result {
                     Ok(_) => debug!("TX [{}] Message sent successfully", self.device_id),
                     Err(e) => debug!("TX [{}] Send failed: {}", self.device_id, e),
                 }
             }
-            
+
             result
         }
 
         #[inline]
         async fn receive_message(&mut self) -> Result<Message> {
             let result = self.inner.receive_message().await;
-            
+
             match &result {
                 Ok(message) => {
                     if self.is_debug_enabled() {
@@ -127,7 +141,7 @@ mod debug_enabled {
                     }
                 }
             }
-            
+
             result
         }
 
@@ -136,16 +150,16 @@ mod debug_enabled {
             if self.is_debug_enabled() {
                 debug!("CONN [{}] Attempting to connect...", self.device_id);
             }
-            
+
             let result = self.inner.connect().await;
-            
+
             if self.is_debug_enabled() {
                 match &result {
                     Ok(_) => info!("CONN [{}] Connected successfully", self.device_id),
                     Err(e) => debug!("CONN [{}] Connection failed: {}", self.device_id, e),
                 }
             }
-            
+
             result
         }
 
@@ -154,16 +168,16 @@ mod debug_enabled {
             if self.is_debug_enabled() {
                 debug!("DISC [{}] Disconnecting...", self.device_id);
             }
-            
+
             let result = self.inner.disconnect().await;
-            
+
             if self.is_debug_enabled() {
                 match &result {
                     Ok(_) => info!("DISC [{}] Disconnected successfully", self.device_id),
                     Err(e) => debug!("DISC [{}] Disconnect failed: {}", self.device_id, e),
                 }
             }
-            
+
             result
         }
 
@@ -187,16 +201,16 @@ mod debug_enabled {
             if self.is_debug_enabled() {
                 debug!("HEALTH [{}] Running health check...", self.device_id);
             }
-            
+
             let result = self.inner.health_check().await;
-            
+
             if self.is_debug_enabled() {
                 match &result {
                     Ok(_) => debug!("HEALTH [{}] Health check passed", self.device_id),
                     Err(e) => debug!("HEALTH [{}] Health check failed: {}", self.device_id, e),
                 }
             }
-            
+
             result
         }
     }
@@ -290,10 +304,9 @@ pub use debug_disabled::DebugTransport;
 pub fn is_debug_env_enabled() -> bool {
     #[cfg(feature = "transport-debug")]
     {
-        std::env::var("DBGIF_DEBUG").is_ok() || 
-        std::env::var("DBGIF_DEBUG_TRANSPORT").is_ok()
+        std::env::var("DBGIF_DEBUG").is_ok() || std::env::var("DBGIF_DEBUG_TRANSPORT").is_ok()
     }
-    
+
     #[cfg(not(feature = "transport-debug"))]
     {
         false
@@ -307,7 +320,8 @@ mod tests {
     #[test]
     fn test_environment_detection() {
         // Test without env var
-        if std::env::var("DBGIF_DEBUG").is_err() && std::env::var("DBGIF_DEBUG_TRANSPORT").is_err() {
+        if std::env::var("DBGIF_DEBUG").is_err() && std::env::var("DBGIF_DEBUG_TRANSPORT").is_err()
+        {
             #[cfg(not(feature = "transport-debug"))]
             assert!(!is_debug_env_enabled());
         }

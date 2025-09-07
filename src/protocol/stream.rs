@@ -64,8 +64,11 @@ impl StreamManager {
 
         let stream = Stream::new(local_id, remote_id);
         self.streams.insert(local_id, stream);
-        
-        debug!("Created stream with local_id: {}, remote_id: {}", local_id, remote_id);
+
+        debug!(
+            "Created stream with local_id: {}, remote_id: {}",
+            local_id, remote_id
+        );
         local_id
     }
 

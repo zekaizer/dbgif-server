@@ -1,13 +1,13 @@
-use std::io;
-use tokio::net::TcpStream;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use bytes::{BytesMut, Buf};
 use anyhow::Result;
 use async_trait::async_trait;
+use bytes::{Buf, BytesMut};
+use std::io;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 use tracing::{debug, error};
 
-use crate::protocol::message::Message;
 use super::{Transport, TransportType};
+use crate::protocol::message::Message;
 
 pub struct TcpTransport {
     client_id: String,
@@ -33,18 +33,20 @@ impl TcpTransport {
     }
 
     async fn read_message_internal(&mut self) -> Result<Option<Message>> {
-        let stream = self.stream.as_mut()
+        let stream = self
+            .stream
+            .as_mut()
             .ok_or_else(|| anyhow::anyhow!("Stream not connected"))?;
 
         // Read header (24 bytes)
         let mut header = [0u8; 24];
-        
+
         match stream.read_exact(&mut header).await {
-            Ok(_) => {},
+            Ok(_) => {}
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
                 self.is_connected = false;
                 return Ok(None); // Client disconnected
-            },
+            }
             Err(e) => {
                 self.is_connected = false;
                 return Err(e.into());
@@ -61,7 +63,7 @@ impl TcpTransport {
         // Read data payload if present
         let mut full_message = BytesMut::with_capacity(24 + data_length as usize);
         full_message.extend_from_slice(&header);
-        
+
         if data_length > 0 {
             let mut data = vec![0u8; data_length as usize];
             match stream.read_exact(&mut data).await {
@@ -78,18 +80,26 @@ impl TcpTransport {
     }
 
     async fn send_message_internal(&mut self, message: &Message) -> Result<()> {
-        let stream = self.stream.as_mut()
+        let stream = self
+            .stream
+            .as_mut()
             .ok_or_else(|| anyhow::anyhow!("Stream not connected"))?;
 
         let data = message.serialize();
         match stream.write_all(&data).await {
             Ok(_) => {
-                debug!("TCP client {} sent message: {:?}", self.client_id, message.command);
+                debug!(
+                    "TCP client {} sent message: {:?}",
+                    self.client_id, message.command
+                );
                 Ok(())
             }
             Err(e) => {
                 self.is_connected = false;
-                error!("Failed to send message to TCP client {}: {}", self.client_id, e);
+                error!(
+                    "Failed to send message to TCP client {}: {}",
+                    self.client_id, e
+                );
                 Err(e.into())
             }
         }
@@ -105,7 +115,7 @@ impl Transport for TcpTransport {
     async fn receive_message(&mut self) -> Result<Message> {
         match self.read_message_internal().await? {
             Some(message) => Ok(message),
-            None => Err(anyhow::anyhow!("Connection closed"))
+            None => Err(anyhow::anyhow!("Connection closed")),
         }
     }
 
@@ -114,7 +124,9 @@ impl Transport for TcpTransport {
             self.is_connected = true;
             Ok(())
         } else {
-            Err(anyhow::anyhow!("Cannot reconnect TCP transport - no stream available"))
+            Err(anyhow::anyhow!(
+                "Cannot reconnect TCP transport - no stream available"
+            ))
         }
     }
 
@@ -151,23 +163,23 @@ impl Transport for TcpTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::{Command, Message};
     use tokio::net::{TcpListener, TcpStream};
-    use crate::protocol::{Message, Command};
 
     #[tokio::test]
     async fn test_tcp_transport_creation() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        
+
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             // Just accept and close
             drop(stream);
         });
-        
+
         let stream = TcpStream::connect(addr).await.unwrap();
         let transport = TcpTransport::new("test_client".to_string(), stream);
-        
+
         assert!(transport.is_connected().await);
         assert_eq!(transport.device_id(), "test_client");
         assert_eq!(transport.transport_type(), TransportType::Tcp);
@@ -176,7 +188,7 @@ mod tests {
     #[tokio::test]
     async fn test_tcp_transport_disconnected() {
         let transport = TcpTransport::new_disconnected("test_client".to_string());
-        
+
         assert!(!transport.is_connected().await);
         assert!(transport.health_check().await.is_err());
     }

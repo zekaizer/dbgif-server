@@ -1,11 +1,11 @@
-pub mod constants;
-pub mod message;
 pub mod checksum;
-pub mod stream;
+pub mod constants;
 pub mod host_commands;
+pub mod message;
+pub mod stream;
 
-pub use constants::*;
-pub use message::*;
 pub use checksum::{calculate, verify};
-pub use stream::*;
+pub use constants::*;
 pub use host_commands::*;
+pub use message::*;
+pub use stream::*;
