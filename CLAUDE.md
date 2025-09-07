@@ -9,6 +9,40 @@ ADB (Android Debug Bridge) Protocol을 Base로 하는 DBGIF(Debug Interface) 서
 
 ## Architecture
 
+```
+┌─────────────┐    TCP 5037     ┌──────────────┐
+│   Client 1  │◄────────────────┤              │
+├─────────────┤                 │              │
+│   Client 2  │◄────────────────┤  DBGIF       │
+├─────────────┤                 │  Server      │
+│   Client N  │◄────────────────┤              │
+└─────────────┘                 │              │
+                                └──────┬───────┘
+                                       │
+                               ┌───────▼────────┐
+                               │   Transport    │
+                               │    Manager     │
+                               └───────┬────────┘
+                                       │
+                     ┌─────────────────┼─────────────────┐
+                     │                 │                 │
+             ┌───────▼────────┐ ┌──────▼──────┐ ┌───────▼────────┐
+             │  TCP Transport │ │Android USB  │ │ Bridge USB     │
+             │                │ │  Transport  │ │   Transport    │
+             └───────┬────────┘ └──────┬──────┘ └───────┬────────┘
+                     │                 │                 │
+             ┌───────▼────────┐ ┌──────▼──────┐ ┌───────▼────────┐
+             │ Remote Device  │ │Local Android│ │Bridge Connected│
+             │   Daemon       │ │   Daemon    │ │    Device      │
+             │    (adbd)      │ │   (adbd)    │ │   Daemon       │
+             └────────────────┘ └─────────────┘ └────────────────┘
+```
+
+**3-Layer Structure:**
+- **Server Layer** (`src/server/`): N Clients → 1 Server (TCP 5037)
+- **Protocol Layer** (`src/protocol/`): Message/Stream multiplexing
+- **Transport Layer** (`src/transport/`): 1 Server → N Device Daemons
+
 ### 1. Project Setup
 **Dependencies (Cargo.toml)**
 - `tokio` - 비동기 런타임 (TCP/USB 처리)
