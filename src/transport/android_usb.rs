@@ -252,7 +252,7 @@ impl Transport for AndroidUsbTransport {
     }
 
     fn transport_type(&self) -> TransportType {
-        TransportType::Usb
+        TransportType::AndroidUsb
     }
 
     async fn health_check(&self) -> Result<()> {

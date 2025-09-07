@@ -8,7 +8,7 @@ use crate::protocol::message::Message;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TransportType {
     Tcp,
-    Usb,
+    AndroidUsb,
     BridgeUsb,
 }
 
@@ -16,7 +16,7 @@ impl fmt::Display for TransportType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             TransportType::Tcp => write!(f, "TCP"),
-            TransportType::Usb => write!(f, "USB"),
+            TransportType::AndroidUsb => write!(f, "Android USB"),
             TransportType::BridgeUsb => write!(f, "Bridge USB"),
         }
     }
