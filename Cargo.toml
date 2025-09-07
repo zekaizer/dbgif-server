@@ -1,0 +1,9 @@
+[package]
+name = "dbgif-server"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bytes = "1.5"
+crc32fast = "1.3"
+anyhow = "1.0"
