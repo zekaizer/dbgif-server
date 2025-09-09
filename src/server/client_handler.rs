@@ -1,14 +1,17 @@
 use anyhow::Result;
-use bytes::Bytes;
+use bytes::{Buf, Bytes, BytesMut};
 use std::collections::HashMap;
+use std::io;
 use std::sync::Arc;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 use tracing::{debug, error, info};
 
 use crate::protocol::host_commands::HostCommand;
 use crate::protocol::stream::StreamManager;
 use crate::protocol::{Command, Message, VERSION};
 use crate::services::HostService;
-use crate::transport::{Transport, TransportManager};
+use crate::transport::TransportManager;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ClientState {
@@ -28,7 +31,7 @@ struct StreamMapping {
 
 pub struct ClientHandler {
     client_id: u32,
-    transport: Box<dyn Transport + Send>,
+    stream: TcpStream,
     state: ClientState,
     stream_manager: StreamManager,
     host_service: HostService,
@@ -43,12 +46,12 @@ pub struct ClientHandler {
 impl ClientHandler {
     pub fn new(
         client_id: u32,
-        transport: Box<dyn Transport + Send>,
+        stream: TcpStream,
         transport_manager: Arc<TransportManager>,
     ) -> Self {
         Self {
             client_id,
-            transport,
+            stream,
             state: ClientState::Connecting,
             stream_manager: StreamManager::new(),
             host_service: HostService::new(transport_manager.clone()),
@@ -63,7 +66,7 @@ impl ClientHandler {
         info!("Starting client handler for client {}", self.client_id);
 
         loop {
-            match self.transport.receive_message().await {
+            match self.receive_message().await {
                 Ok(message) => {
                     debug!(
                         "Client {} received message: {:?}",
@@ -91,10 +94,10 @@ impl ClientHandler {
         self.state = ClientState::Disconnected;
         self.stream_manager.close_all_streams();
 
-        // Disconnect transport
-        if let Err(e) = self.transport.disconnect().await {
+        // Disconnect client stream
+        if let Err(e) = self.stream.shutdown().await {
             error!(
-                "Failed to disconnect transport for client {}: {}",
+                "Failed to disconnect stream for client {}: {}",
                 self.client_id, e
             );
         }
@@ -103,12 +106,48 @@ impl ClientHandler {
     }
 
     async fn send_message(&mut self, message: Message) -> Result<()> {
-        self.transport.send_message(&message).await?;
+        let data = message.serialize();
+        self.stream.write_all(&data).await?;
         debug!(
             "Client {} sent message: {:?}",
             self.client_id, message.command
         );
         Ok(())
+    }
+
+    async fn receive_message(&mut self) -> Result<Message> {
+        // Read header (24 bytes)
+        let mut header = [0u8; 24];
+
+        match self.stream.read_exact(&mut header).await {
+            Ok(_) => {},
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
+                return Err(anyhow::anyhow!("Client disconnected"));
+            }
+            Err(e) => {
+                return Err(e.into());
+            }
+        }
+
+        // Parse header to get data length
+        let mut buf = BytesMut::from(&header[..]);
+        let _command = buf.get_u32_le();
+        let _arg0 = buf.get_u32_le();
+        let _arg1 = buf.get_u32_le();
+        let data_length = buf.get_u32_le();
+
+        // Read data payload if present
+        let mut full_message = BytesMut::with_capacity(24 + data_length as usize);
+        full_message.extend_from_slice(&header);
+
+        if data_length > 0 {
+            let mut data = vec![0u8; data_length as usize];
+            self.stream.read_exact(&mut data).await?;
+            full_message.extend_from_slice(&data);
+        }
+
+        let message = Message::deserialize(full_message.freeze())?;
+        Ok(message)
     }
 
     async fn handle_message(&mut self, message: Message) -> Result<()> {

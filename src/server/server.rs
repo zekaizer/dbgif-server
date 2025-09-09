@@ -6,8 +6,7 @@ use tracing::{debug, error, info};
 
 use super::client_handler::ClientHandler;
 use crate::protocol::constants::DEFAULT_PORT;
-use crate::transport::tcp::TcpTransport;
-use crate::transport::{Transport, TransportManager};
+use crate::transport::TransportManager;
 
 pub struct DbgifServer {
     listener: Option<TcpListener>,
@@ -75,11 +74,8 @@ impl DbgifServer {
 
                             let transport_manager = self.transport_manager.clone();
                             tokio::spawn(async move {
-                                let tcp_transport =
-                                    TcpTransport::new(format!("tcp_client_{}", client_id), stream);
-                                let transport: Box<dyn Transport + Send> = Box::new(tcp_transport);
                                 let mut handler =
-                                    ClientHandler::new(client_id, transport, transport_manager);
+                                    ClientHandler::new(client_id, stream, transport_manager);
 
                                 if let Err(e) = handler.handle().await {
                                     error!("Client {} disconnected with error: {}", client_id, e);
