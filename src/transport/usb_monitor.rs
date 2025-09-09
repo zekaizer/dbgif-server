@@ -200,6 +200,12 @@ impl UsbMonitor {
         let udev_info = get_device_info(&device_info)?;
         let device_key = (udev_info.bus_number, udev_info.address);
 
+        // Check if device is already registered
+        if device_map.read().await.contains_key(&device_key) {
+            debug!("Device {}:{} already registered, skipping", device_key.0, device_key.1);
+            return Ok(());
+        }
+
         // Check if device is supported by any factory
         for factory in factories.iter() {
             if factory.supported_devices().contains(&(udev_info.vendor_id, udev_info.product_id)) {
