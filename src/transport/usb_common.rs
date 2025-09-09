@@ -1,6 +1,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use rusb::{Device, GlobalContext};
+use nusb::DeviceInfo;
 use std::fmt;
 
 use super::Transport;
@@ -45,37 +45,37 @@ pub trait UsbTransportFactory: Send + Sync {
     /// Create transport instance for the device
     async fn create_transport(
         &self,
-        device: Device<GlobalContext>,
+        device_info: DeviceInfo,
     ) -> Result<Box<dyn Transport + Send>>;
 
     /// Get factory name for debugging
     fn name(&self) -> &str;
 
     /// Additional device validation (optional)
-    fn validate_device(&self, device: &Device<GlobalContext>) -> Result<()> {
-        // Default implementation - just check if device can be opened
-        let _handle = device.open()?;
+    fn validate_device(&self, device_info: &DeviceInfo) -> Result<()> {
+        // Default implementation - just check if device info is valid
+        let _ = device_info.vendor_id();
+        let _ = device_info.product_id();
         Ok(())
     }
 }
 
-/// Helper function to extract device information
-pub fn get_device_info(device: &Device<GlobalContext>) -> Result<UsbDeviceInfo> {
-    let descriptor = device.device_descriptor()?;
-
-    // Try to get serial number
-    let serial = match device.open() {
-        Ok(handle) => handle
-            .read_serial_number_string_ascii(&descriptor)
-            .ok(),
-        Err(_) => None,
-    };
+/// Helper function to extract device information from DeviceInfo
+pub fn get_device_info(device_info: &DeviceInfo) -> Result<UsbDeviceInfo> {
+    // nusb DeviceInfo provides direct access to device properties
+    let vendor_id = device_info.vendor_id();
+    let product_id = device_info.product_id();
+    let bus_number = device_info.bus_number();
+    let address = device_info.device_address();
+    
+    // Get serial number if available
+    let serial = device_info.serial_number().map(|s| s.to_string());
 
     Ok(UsbDeviceInfo {
-        vendor_id: descriptor.vendor_id(),
-        product_id: descriptor.product_id(),
-        bus_number: device.bus_number(),
-        address: device.address(),
+        vendor_id,
+        product_id,
+        bus_number,
+        address,
         serial,
     })
 }

@@ -36,8 +36,8 @@ async fn main() -> Result<()> {
     // Register USB factories if monitor was created successfully
     if let Some(ref mut monitor) = usb_monitor {
         info!("Registering USB transport factories...");
-        monitor.register_factory(Arc::new(AndroidUsbFactory::new()));
-        monitor.register_factory(Arc::new(BridgeUsbFactory::new()));
+        monitor.register_factory(Arc::new(AndroidUsbFactory));
+        monitor.register_factory(Arc::new(BridgeUsbFactory));
 
         // Start USB monitoring
         if let Err(e) = monitor.start_monitoring().await {
@@ -46,15 +46,12 @@ async fn main() -> Result<()> {
             info!("USB hotplug monitoring enabled");
             
             // Scan for existing devices
-            match monitor.scan_existing_devices().await {
-                Ok(count) => {
-                    if count > 0 {
-                        info!("Found {} existing USB device(s)", count);
-                    } else {
-                        info!("No USB devices found during initial scan");
-                    }
-                }
-                Err(e) => warn!("Initial USB device scan failed: {}", e),
+            let devices = monitor.list_devices().await;
+            let count = devices.len();
+            if count > 0 {
+                info!("Found {} existing USB device(s)", count);
+            } else {
+                info!("No USB devices found during initial scan");
             }
         }
     }

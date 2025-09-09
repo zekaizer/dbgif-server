@@ -15,6 +15,6 @@ anyhow = "1.0"
 tokio = { version = "1.35", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-rusb = "0.9"
+nusb = "0.1"
 async-trait = "0.1"
 futures = "0.3"

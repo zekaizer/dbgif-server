@@ -12,7 +12,7 @@ ADB (Android Debug Bridge) Protocol을 Base로 하는 DBGIF(Debug Interface) 서
 - 플랫폼 특정 기능이 필요한 경우 `cfg` 속성을 사용하여 조건부 컴파일
 - 가능한 한 cross-platform 라이브러리 사용
 - 파일 경로는 `std::path::Path`를 사용하여 OS 독립적으로 처리
-- USB 드라이버는 libusb를 통해 Linux/Windows 모두 지원
+- USB 드라이버는 nusb (pure Rust)를 통해 Linux/Windows 모두 지원
 
 ## Architecture
 
@@ -57,6 +57,9 @@ ADB (Android Debug Bridge) Protocol을 Base로 하는 DBGIF(Debug Interface) 서
 - `crc32fast` - CRC32 체크섬 계산
 - `tracing` - 로깅
 - `anyhow` - 에러 처리
+- `nusb` - Pure Rust USB 통신 라이브러리 (libusb 대신)
+- `async-trait` - 비동기 trait 지원
+- `futures` - 추가 비동기 유틸리티
 
 ### 2. Core Protocol Module (`src/protocol/`)
 
@@ -100,43 +103,45 @@ ADB (Android Debug Bridge) Protocol을 Base로 하는 DBGIF(Debug Interface) 서
 - local_id/remote_id 매핑
 - 스트림별 버퍼 관리
 
-#### usb.rs
-- USB 통신 레이어 (libusb-rs 사용)
-- USB 트랜잭션 처리
-- 헤더와 데이터 분리 전송
+### Transport Layer (`src/transport/`)
+
+#### manager.rs
+- Transport 통합 관리
+- 팩토리 패턴 기반 디바이스 지원
+
+#### usb_monitor.rs
+- nusb 기반 USB 디바이스 모니터링
+- 핫플러그 이벤트 감지 및 폴링 폴백 모드
+- 디바이스 생명주기 관리
+
+#### usb_common.rs
+- USB Transport 공통 인터페이스
+- UsbTransportFactory trait 정의
 
 ##### USB Transport Types
-1. **기본 USB Transport**
+1. **Android USB Transport (android_usb.rs)**
+   - 표준 Android ADB 디바이스 지원
    - Bulk IN/OUT 엔드포인트 사용
-   - 표준 ADB USB 통신
+   - 58개 Android VID/PID 조합 지원
 
-2. **USB Host-to-Host Bridge Cable Transport**
-   - USB Host-to-Host Bridge Cable(Prolific PL-2501)을 통한 직접 연결
-   - Bulk IN/OUT 엔드포인트 + Interrupt IN 엔드포인트 사용
-   - Interrupt IN을 통해 상대편 연결 상태 모니터링
-   - 연결 상태 변화 감지 및 실시간 알림
+2. **Bridge USB Transport (bridge_usb.rs)**
+   - USB Host-to-Host Bridge Cable 지원 (PL-25A1)
+   - Bulk IN/OUT 엔드포인트 + Vendor Control Commands
+   - 연결 상태 모니터링 및 제어 기능
+   - PL-25A1 전용으로 단순화됨
 
 ### 4. Service Handlers (`src/services/`)
 
-#### shell.rs
-- 셸 명령 실행
-- 명령 형식: "shell:command"
-- 출력 스트리밍
+#### host_service.rs
+- ADB 호스트 명령 처리
+- 디바이스 목록, 연결 상태 등
+- "host:" 명령 처리
 
-#### file_sync.rs
-- 파일 전송 서비스
-- 명령 형식: "sync:"
-- 파일 업로드/다운로드
-
-#### port_forward.rs
-- TCP 포트 포워딩
-- 명령 형식: "tcp:port"
-- 로컬/리모트 포트 매핑
-
-#### logcat.rs
-- 로그 스트리밍
-- 명령 형식: "shell:logcat"
-- 실시간 로그 전송
+#### (계획 중인 서비스들)
+- shell.rs - 셸 명령 실행
+- file_sync.rs - 파일 전송 서비스  
+- port_forward.rs - TCP 포트 포워딩
+- logcat.rs - 로그 스트리밍
 
 ### 5. State Machine (`src/state/`)
 
@@ -182,6 +187,7 @@ Closed → Opening → Open → Closing
 - USB 통신 시 헤더와 데이터 분리 전송 필수
 - 최대 메시지 크기: 256KB
 - CNXN/AUTH 메시지는 4096 바이트 제한
+- nusb API 사용 시 RequestBuffer와 Completion 패턴 적용
 
 ### 에러 처리
 - 잘못된 magic value 검증
@@ -224,7 +230,28 @@ cargo fmt
 cargo clippy
 ```
 
-## References
+## Current Implementation Status
+
+### ✅ 완료된 구현
+- Core Protocol Layer (message.rs, checksum.rs, constants.rs)
+- Server Layer (TCP 바인딩, 클라이언트 핸들러)
+- USB Transport Layer (nusb 기반 완전 구현)
+- USB Hotplug 모니터링 (핫플러그 + 폴링 하이브리드)
+- Host Services (디바이스 목록, 상태 조회)
+- Graceful Shutdown 메커니즘
+
+### 🔄 진행 중인 작업  
+- Stream multiplexing 고도화
+- 추가 ADB 서비스 구현 (shell, sync, port forwarding)
+- 실제 하드웨어 테스트 및 최적화
+
+### 📚 기술 사양서
 - [ADB Protocol Documentation](/docs/ADB_Architecture_Protocol.md)
+- [nusb Migration Plan](/docs/nusb-migration-plan.md)
+- [PL-25A1 Device Specifications](/docs/PL25A1.md)
+- [USB Bridge Cable Documentation](/docs/PL2501.md)
+
+## References
 - Android Open Source Project (AOSP)
-- ADB Protocol Internals
+- nusb crate documentation
+- Prolific PL-25A1 technical specifications

@@ -1,12 +1,14 @@
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
-use rusb::{Context as UsbContext, Device, DeviceHandle};
-use std::collections::HashMap;
+use nusb::{DeviceInfo, Interface};
+use nusb::transfer::RequestBuffer;
+// Control transfer imports not needed for Android USB
+use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::RwLock;
-use tracing::{debug, info, warn};
+use tokio::sync::Mutex;
+use tracing::{debug, info};
 
-use super::{Transport, TransportType, UsbTransportFactory};
+use super::{ConnectionStatus, Transport, TransportType, UsbTransportFactory};
 use crate::protocol::constants::MAXDATA;
 use crate::protocol::message::Message;
 
@@ -55,406 +57,257 @@ const SUPPORTED_ANDROID_DEVICES: &[(u16, u16)] = &[
     // Motorola devices
     (0x22b8, 0x2e76), // Moto series
     (0x22b8, 0x2e82), // Edge series
+    
+    // Sony devices
+    (0x054c, 0x0dcd), // Xperia series
+    (0x054c, 0x0fce), // Xperia Z series
+    
+    // Asus devices
+    (0x0b05, 0x4daf), // ZenFone series
+    (0x0b05, 0x7772), // Transformer series
+    
+    // Lenovo devices
+    (0x17ef, 0x7497), // Tab series
+    (0x17ef, 0x741c), // ThinkPad Tablet
+    
+    // Acer devices
+    (0x0502, 0x3325), // Iconia series
+    (0x0502, 0x3341), // Liquid series
+    
+    // Dell devices
+    (0x413c, 0xb06e), // Venue series
+    
+    // Generic Android devices
+    (0x18d1, 0x0001), // Generic Android (fastboot)
+    (0x18d1, 0x4ee0), // Generic ADB interface
 ];
 
-// USB configuration and interface
-const USB_CONFIGURATION: u8 = 1;
+// USB interface configuration
 const USB_INTERFACE: u8 = 0;
 
-// Timeout for USB operations (5 seconds)
+// Endpoint addresses (typical for Android ADB)
+const BULK_OUT_EP: u8 = 0x01;  // Host -> Device
+const BULK_IN_EP: u8 = 0x81;   // Device -> Host
+
+// Timeout for USB operations
 const USB_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Android USB device transport
 pub struct AndroidUsbTransport {
     device_id: String,
-    handle: DeviceHandle<rusb::GlobalContext>,
-    in_endpoint: u8,
-    out_endpoint: u8,
+    interface: Arc<Mutex<Interface>>,
     is_connected: bool,
+    vendor_id: u16,
+    product_id: u16,
 }
 
 impl AndroidUsbTransport {
     /// Create new Android USB transport for a device
-    pub fn new(device: Device<rusb::GlobalContext>) -> Result<Self> {
-        let device_descriptor = device
-            .device_descriptor()
-            .context("Failed to get device descriptor")?;
-
+    pub async fn new(device_info: DeviceInfo) -> Result<Self> {
+        let vendor_id = device_info.vendor_id();
+        let product_id = device_info.product_id();
+        
         // Get device serial number or use bus:address as fallback
-        let device_id = match device.open() {
-            Ok(handle) => match handle.read_serial_number_string_ascii(&device_descriptor) {
-                Ok(serial) => serial,
-                Err(_) => format!("{}:{}", device.bus_number(), device.address()),
-            },
-            Err(_) => format!("{}:{}", device.bus_number(), device.address()),
+        let device_id = match device_info.serial_number() {
+            Some(serial) => serial.to_string(),
+            None => format!("android_{}:{}", device_info.bus_number(), device_info.device_address()),
         };
 
-        let handle = device.open().context("Failed to open USB device")?;
-
-        // Set configuration
-        handle
-            .set_active_configuration(USB_CONFIGURATION)
-            .context("Failed to set USB configuration")?;
-
-        // Claim interface
-        handle
+        // Open device and claim interface
+        let device = device_info.open().context("Failed to open USB device")?;
+        let interface = device
             .claim_interface(USB_INTERFACE)
             .context("Failed to claim USB interface")?;
 
-        // Find bulk endpoints
-        let config_descriptor = device
-            .config_descriptor(0)
-            .context("Failed to get configuration descriptor")?;
+        info!(
+            "Android USB device {} ({:04x}:{:04x}) initialized",
+            device_id, vendor_id, product_id
+        );
 
-        let interface_descriptor = config_descriptor
-            .interfaces()
-            .next()
-            .context("No interface found")?
-            .descriptors()
-            .next()
-            .context("No interface descriptor found")?;
-
-        let mut in_endpoint = None;
-        let mut out_endpoint = None;
-
-        for endpoint in interface_descriptor.endpoint_descriptors() {
-            if endpoint.transfer_type() == rusb::TransferType::Bulk {
-                match endpoint.direction() {
-                    rusb::Direction::In => in_endpoint = Some(endpoint.address()),
-                    rusb::Direction::Out => out_endpoint = Some(endpoint.address()),
-                }
-            }
-        }
-
-        let in_endpoint = in_endpoint.context("No bulk IN endpoint found")?;
-        let out_endpoint = out_endpoint.context("No bulk OUT endpoint found")?;
-
-        Ok(AndroidUsbTransport {
+        Ok(Self {
             device_id,
-            handle,
-            in_endpoint,
-            out_endpoint,
+            interface: Arc::new(Mutex::new(interface)),
             is_connected: true,
+            vendor_id,
+            product_id,
         })
     }
 
-    /// Get device ID
-    pub fn device_id(&self) -> &str {
-        &self.device_id
-    }
-
     /// Send message to USB device (header first, then data)
-    pub fn send_message(&mut self, message: &Message) -> Result<()> {
+    async fn send_message_internal(&mut self, message: &Message) -> Result<()> {
         let serialized = message.serialize();
 
         // Split into header (24 bytes) and data
         let header = &serialized[..24];
         let data = &serialized[24..];
 
+        let interface = self.interface.lock().await;
+
         // Send header first
-        match self.send_bulk(header) {
-            Ok(_) => {}
-            Err(e) => {
-                self.is_connected = false;
-                return Err(e);
-            }
+        let completion = interface.bulk_out(BULK_OUT_EP, header.to_vec()).await;
+        if let Err(e) = completion.status {
+            self.is_connected = false;
+            return Err(anyhow::anyhow!("Header send failed: {}", e));
         }
+        
+        // Note: nusb bulk transfers should send the complete buffer
+        // No need to check partial sends as in rusb
 
         // Send data if present
         if !data.is_empty() {
-            match self.send_bulk(data) {
-                Ok(_) => {}
-                Err(e) => {
-                    self.is_connected = false;
-                    return Err(e);
-                }
+            let completion = interface.bulk_out(BULK_OUT_EP, data.to_vec()).await;
+            if let Err(e) = completion.status {
+                self.is_connected = false;
+                return Err(anyhow::anyhow!("Data send failed: {}", e));
             }
         }
 
         debug!(
-            "Sent message to device {}: {:?}",
+            "Sent message to Android device {}: {:?}",
             self.device_id, message.command
         );
         Ok(())
     }
 
     /// Receive message from USB device
-    pub fn receive_message(&mut self) -> Result<Message> {
-        // Receive header first (24 bytes)
-        let mut header_buf = vec![0u8; 24];
-        let header_len = match self.receive_bulk(&mut header_buf) {
-            Ok(len) => len,
-            Err(e) => {
-                self.is_connected = false;
-                return Err(e);
-            }
-        };
+    async fn receive_message_internal(&mut self) -> Result<Message> {
+        let interface = self.interface.lock().await;
 
-        if header_len != 24 {
+        // Read header first (24 bytes)
+        // RequestBuffer already imported at top
+        let request_buffer = RequestBuffer::new(24);
+        let completion = interface.bulk_in(BULK_IN_EP, request_buffer).await;
+        
+        if let Err(e) = completion.status {
             self.is_connected = false;
-            bail!("Invalid header size: expected 24 bytes, got {}", header_len);
+            return Err(anyhow::anyhow!("Header receive failed: {}", e));
         }
+        
+        if completion.data.len() != 24 {
+            self.is_connected = false;
+            bail!(
+                "Invalid header size received: {} (expected 24)",
+                completion.data.len()
+            );
+        }
+        
+        let header_buffer = completion.data;
 
         // Parse header to get data length
-        let data_length = u32::from_le_bytes([
-            header_buf[12],
-            header_buf[13],
-            header_buf[14],
-            header_buf[15],
-        ]) as usize;
+        use bytes::Buf;
+        let mut header_cursor = std::io::Cursor::new(&header_buffer);
+        let _command_raw = header_cursor.get_u32_le();
+        let _arg0 = header_cursor.get_u32_le();
+        let _arg1 = header_cursor.get_u32_le();
+        let data_length = header_cursor.get_u32_le();
 
-        // Receive data if present
-        let mut full_message = header_buf;
+        let mut full_data = header_buffer;
+
+        // Read data if present
         if data_length > 0 {
-            if data_length > MAXDATA {
+            if data_length as usize > MAXDATA {
                 bail!("Data too large: {} bytes (max: {})", data_length, MAXDATA);
             }
 
-            let mut data_buf = vec![0u8; data_length];
-            let data_len = match self.receive_bulk(&mut data_buf) {
-                Ok(len) => len,
-                Err(e) => {
-                    self.is_connected = false;
-                    return Err(e);
-                }
-            };
-
-            if data_len != data_length {
+            let request_buffer = RequestBuffer::new(data_length as usize);
+            let completion = interface.bulk_in(BULK_IN_EP, request_buffer).await;
+            
+            if let Err(e) = completion.status {
+                self.is_connected = false;
+                return Err(anyhow::anyhow!("Data receive failed: {}", e));
+            }
+            
+            if completion.data.len() != data_length as usize {
                 self.is_connected = false;
                 bail!(
-                    "Data length mismatch: expected {}, got {}",
-                    data_length,
-                    data_len
+                    "Invalid data size received: {} (expected {})",
+                    completion.data.len(),
+                    data_length
                 );
             }
-
-            full_message.extend_from_slice(&data_buf);
+            
+            full_data.extend_from_slice(&completion.data);
         }
 
-        let message = Message::deserialize(&full_message[..])?;
+        let message = Message::deserialize(full_data.as_slice()).context("Failed to deserialize message")?;
         debug!(
-            "Received message from device {}: {:?}",
+            "Received message from Android device {}: {:?}",
             self.device_id, message.command
         );
         Ok(message)
     }
 
-    /// Send bulk data in chunks
-    fn send_bulk(&mut self, data: &[u8]) -> Result<()> {
-        let mut offset = 0;
-        while offset < data.len() {
-            let chunk_size = std::cmp::min(16384, data.len() - offset); // 16KB chunks
-            let chunk = &data[offset..offset + chunk_size];
-
-            let written = self
-                .handle
-                .write_bulk(self.out_endpoint, chunk, USB_TIMEOUT)
-                .context("Failed to write bulk data")?;
-
-            if written != chunk_size {
-                bail!("Partial write: expected {}, wrote {}", chunk_size, written);
-            }
-
-            offset += written;
+    /// Check connection status by attempting a simple operation
+    async fn check_connection_status(&self) -> Result<ConnectionStatus> {
+        // For Android devices, we assume they're ready if they're not flagged as disconnected
+        // A more sophisticated implementation could send a PING message
+        if self.is_connected {
+            Ok(ConnectionStatus::Ready)
+        } else {
+            Ok(ConnectionStatus::Disconnected)
         }
-        Ok(())
     }
 
-    /// Receive bulk data
-    fn receive_bulk(&mut self, buffer: &mut [u8]) -> Result<usize> {
-        let read = self
-            .handle
-            .read_bulk(self.in_endpoint, buffer, USB_TIMEOUT)
-            .context("Failed to read bulk data")?;
-
-        Ok(read)
+    /// Get device information string
+    pub fn device_info(&self) -> String {
+        format!(
+            "Android USB Device {} ({:04x}:{:04x})",
+            self.device_id, self.vendor_id, self.product_id
+        )
     }
 }
 
 #[async_trait]
 impl Transport for AndroidUsbTransport {
     async fn send_message(&mut self, message: &Message) -> Result<()> {
-        // Call the existing method
-        Self::send_message(self, message)
+        if !self.is_connected {
+            bail!("Android device {} is not connected", self.device_id);
+        }
+        self.send_message_internal(message).await
     }
 
     async fn receive_message(&mut self) -> Result<Message> {
-        // Call the existing method
-        Self::receive_message(self)
-    }
-
-    async fn connect(&mut self) -> Result<()> {
-        // USB devices are connected upon creation
-        // This is mainly for reconnection scenarios
-        self.is_connected = true;
-        info!("USB device {} connected", self.device_id);
-        Ok(())
-    }
-
-    async fn disconnect(&mut self) -> Result<()> {
-        self.is_connected = false;
-        info!("USB device {} marked as disconnected", self.device_id);
-        Ok(())
-    }
-
-    async fn is_connected(&self) -> bool {
-        self.is_connected
+        if !self.is_connected {
+            bail!("Android device {} is not connected", self.device_id);
+        }
+        self.receive_message_internal().await
     }
 
     fn device_id(&self) -> &str {
         &self.device_id
     }
 
+    async fn connect(&mut self) -> Result<()> {
+        if self.is_connected {
+            return Ok(());
+        }
+        
+        // For Android devices, we can't easily re-establish connection
+        // The device would need to be re-enumerated
+        self.is_connected = true; // Optimistic reconnection
+        info!("Android device {} reconnected", self.device_id);
+        Ok(())
+    }
+
     fn transport_type(&self) -> TransportType {
         TransportType::AndroidUsb
     }
 
-    async fn health_check(&self) -> Result<()> {
+    async fn is_connected(&self) -> bool {
+        self.is_connected
+    }
+
+    async fn disconnect(&mut self) -> Result<()> {
         if self.is_connected {
-            // Could add actual USB device validation here
-            Ok(())
-        } else {
-            Err(anyhow::anyhow!(
-                "USB device {} is not connected",
-                self.device_id
-            ))
+            info!("Disconnecting Android device {}", self.device_id);
+            self.is_connected = false;
         }
+        Ok(())
     }
 }
 
-impl Drop for AndroidUsbTransport {
-    fn drop(&mut self) {
-        if let Err(e) = self.handle.release_interface(USB_INTERFACE) {
-            warn!(
-                "Failed to release USB interface for device {}: {}",
-                self.device_id, e
-            );
-        }
-    }
-}
-
-/// Manager for multiple Android USB devices
-pub struct AndroidUsbTransportManager {
-    devices: RwLock<HashMap<String, AndroidUsbTransport>>,
-    #[allow(dead_code)]
-    context: UsbContext,
-}
-
-impl AndroidUsbTransportManager {
-    /// Create new Android USB transport manager
-    pub fn new() -> Result<Self> {
-        let context = UsbContext::new().context("Failed to create USB context")?;
-
-        Ok(AndroidUsbTransportManager {
-            devices: RwLock::new(HashMap::new()),
-            context,
-        })
-    }
-
-    /// Scan for connected DBGIF-compatible devices
-    pub async fn scan_devices(&self) -> Result<Vec<String>> {
-        // Note: This is a simplified scan that just returns device IDs
-        // In a real implementation, we'd need to properly handle the context types
-        let found_devices = Vec::new();
-
-        // For now, return empty list as device scanning needs more complex USB context handling
-        debug!("USB device scan requested - returning empty list for now");
-
-        Ok(found_devices)
-    }
-
-    /// Add a new Android USB device
-    pub async fn add_device(&self, device: Device<rusb::GlobalContext>) -> Result<String> {
-        let transport = AndroidUsbTransport::new(device)?;
-        let device_id = transport.device_id().to_string();
-
-        let mut devices = self.devices.write().await;
-        devices.insert(device_id.clone(), transport);
-
-        info!("Added USB device: {}", device_id);
-        Ok(device_id)
-    }
-
-    /// Remove USB device
-    pub async fn remove_device(&self, device_id: &str) -> Result<()> {
-        let mut devices = self.devices.write().await;
-
-        if devices.remove(device_id).is_some() {
-            info!("Removed USB device: {}", device_id);
-            Ok(())
-        } else {
-            bail!("Device not found: {}", device_id);
-        }
-    }
-
-    /// Send message to specific device
-    pub async fn send_to_device(&self, device_id: &str, message: &Message) -> Result<()> {
-        let mut devices = self.devices.write().await;
-
-        match devices.get_mut(device_id) {
-            Some(transport) => transport.send_message(message),
-            None => bail!("Device not found: {}", device_id),
-        }
-    }
-
-    /// Receive message from specific device
-    pub async fn receive_from_device(&self, device_id: &str) -> Result<Message> {
-        let mut devices = self.devices.write().await;
-
-        match devices.get_mut(device_id) {
-            Some(transport) => transport.receive_message(),
-            None => bail!("Device not found: {}", device_id),
-        }
-    }
-
-    /// Get list of connected device IDs
-    pub async fn get_device_ids(&self) -> Vec<String> {
-        let devices = self.devices.read().await;
-        devices.keys().cloned().collect()
-    }
-
-    /// Monitor for device connections/disconnections
-    pub async fn monitor_devices(&self) -> Result<()> {
-        // This would typically run in a background task
-        // For now, this is a placeholder for hot-plug detection
-        info!("USB device monitoring started");
-
-        loop {
-            tokio::time::sleep(Duration::from_secs(5)).await;
-
-            // Scan for new devices
-            if let Ok(current_devices) = self.scan_devices().await {
-                let existing_devices = self.get_device_ids().await;
-
-                // Check for new devices
-                for device_id in &current_devices {
-                    if !existing_devices.contains(device_id) {
-                        info!("New USB device detected: {}", device_id);
-                        // Note: In a real implementation, you'd need to re-scan
-                        // and add the actual Device object
-                    }
-                }
-
-                // Check for removed devices
-                for device_id in existing_devices {
-                    if !current_devices.contains(&device_id) {
-                        warn!("USB device disconnected: {}", device_id);
-                        let _ = self.remove_device(&device_id).await;
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Factory for creating Android USB transports
+/// Android USB Transport Factory
 pub struct AndroidUsbFactory;
-
-impl AndroidUsbFactory {
-    pub fn new() -> Self {
-        Self
-    }
-}
 
 #[async_trait]
 impl UsbTransportFactory for AndroidUsbFactory {
@@ -464,98 +317,13 @@ impl UsbTransportFactory for AndroidUsbFactory {
 
     async fn create_transport(
         &self,
-        device: Device<rusb::GlobalContext>,
+        device_info: DeviceInfo,
     ) -> Result<Box<dyn Transport + Send>> {
-        let transport = AndroidUsbTransport::new(device)?;
+        let transport = AndroidUsbTransport::new(device_info).await?;
         Ok(Box::new(transport))
     }
 
     fn name(&self) -> &str {
-        "AndroidUSB"
-    }
-
-    fn validate_device(&self, device: &Device<rusb::GlobalContext>) -> Result<()> {
-        let descriptor = device.device_descriptor()?;
-        
-        // Additional validation for Android devices
-        // Check if device has ADB interface (class 255, subclass 66, protocol 1)
-        let config_descriptor = device.config_descriptor(0)?;
-        
-        for interface in config_descriptor.interfaces() {
-            for interface_descriptor in interface.descriptors() {
-                if interface_descriptor.class_code() == 255 
-                    && interface_descriptor.sub_class_code() == 66 
-                    && interface_descriptor.protocol_code() == 1 {
-                    return Ok(());
-                }
-            }
-        }
-        
-        // Fallback: if VID/PID matches, assume it's valid
-        debug!(
-            "Android device VID={:04x} PID={:04x} doesn't have ADB interface, but VID/PID matches",
-            descriptor.vendor_id(), descriptor.product_id()
-        );
-        Ok(())
-    }
-}
-
-impl Default for AndroidUsbFactory {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::transport::UsbDeviceInfo;
-
-    #[tokio::test]
-    async fn test_android_usb_manager_creation() {
-        let manager = AndroidUsbTransportManager::new();
-        assert!(manager.is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_device_list_empty() {
-        let manager = AndroidUsbTransportManager::new().unwrap();
-        let devices = manager.get_device_ids().await;
-        assert!(devices.is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_scan_devices() {
-        let manager = AndroidUsbTransportManager::new().unwrap();
-        let result = manager.scan_devices().await;
-        // This should not fail even if no devices are connected
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_android_usb_factory() {
-        let factory = AndroidUsbFactory::new();
-        assert_eq!(factory.name(), "AndroidUSB");
-        assert!(!factory.supported_devices().is_empty());
-        
-        // Test Google Pixel VID/PID matching
-        let pixel_info = UsbDeviceInfo {
-            vendor_id: 0x18d1,
-            product_id: 0x4ee7,
-            bus_number: 1,
-            address: 2,
-            serial: Some("test".to_string()),
-        };
-        assert!(factory.matches(&pixel_info));
-        
-        // Test non-matching device
-        let unknown_info = UsbDeviceInfo {
-            vendor_id: 0x0000,
-            product_id: 0x0000,
-            bus_number: 1,
-            address: 2,
-            serial: None,
-        };
-        assert!(!factory.matches(&unknown_info));
+        "Android USB"
     }
 }

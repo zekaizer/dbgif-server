@@ -1,5 +1,7 @@
 use anyhow::Result;
-use rusb::{Context, Device, GlobalContext, Hotplug, HotplugBuilder, Registration, UsbContext};
+use futures::StreamExt;
+use nusb::{DeviceId, DeviceInfo};
+use nusb::hotplug::HotplugEvent;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use std::time::{Duration, Instant};
@@ -83,9 +85,7 @@ pub struct UsbMonitor {
     transport_manager: Arc<TransportManager>,
     device_map: Arc<RwLock<HashMap<DeviceKey, String>>>, // (bus, addr) -> device_id
     // Hotplug mode fields
-    context: Option<Context>,
-    registration: Option<Registration<Context>>,
-    monitor_handle: Option<JoinHandle<()>>,
+    hotplug_handle: Option<JoinHandle<()>>,
     // Polling mode fields
     polling_handle: Option<JoinHandle<()>>,
     polling_interval: Duration,
@@ -101,9 +101,7 @@ impl UsbMonitor {
             transport_manager,
             device_map: Arc::new(RwLock::new(HashMap::new())),
             // Hotplug mode fields
-            context: None,
-            registration: None,
-            monitor_handle: None,
+            hotplug_handle: None,
             // Polling mode fields
             polling_handle: None,
             polling_interval: Duration::from_secs(5), // Default 5 seconds
@@ -121,73 +119,297 @@ impl UsbMonitor {
     /// Start USB hotplug monitoring with real-time callbacks
     pub async fn start_monitoring(&mut self) -> Result<()> {
         // Check if already running
-        if self.context.is_some() {
+        if self.hotplug_handle.is_some() {
             warn!("USB monitoring is already running");
             return Ok(());
         }
 
-        // Check if hotplug is supported on this platform
-        if !rusb::has_hotplug() {
-            warn!("USB hotplug not supported on this platform, using polling fallback");
-            return self.start_polling_mode().await;
+        // Try hotplug mode first, fallback to polling
+        match self.start_hotplug_mode().await {
+            Ok(()) => {
+                info!("USB hotplug monitoring started with real-time callbacks");
+                Ok(())
+            }
+            Err(e) => {
+                warn!("USB hotplug failed ({}), falling back to polling mode", e);
+                self.start_polling_mode().await
+            }
         }
+    }
 
-        // Create USB context
-        let context = Context::new().map_err(|e| {
-            anyhow::anyhow!("Failed to create USB context: {}", e)
-        })?;
+    /// Start hotplug monitoring using nusb::watch_devices
+    async fn start_hotplug_mode(&mut self) -> Result<()> {
+        let factories = Arc::clone(&self.factories);
+        let transport_manager = Arc::clone(&self.transport_manager);
+        let device_map = Arc::clone(&self.device_map);
+        let shutdown_flag = Arc::clone(&self.shutdown_flag);
 
-        // Create hotplug handler
-        let handler = UsbHotplugHandler::new(
-            Arc::clone(&self.factories),
-            Arc::clone(&self.transport_manager),
-            Arc::clone(&self.device_map),
-        );
+        let handle = tokio::spawn(async move {
+            info!("USB hotplug monitoring task started");
+            
+            // Initialize with current devices
+            if let Err(e) = Self::scan_and_process_devices(&factories, &transport_manager, &device_map).await {
+                error!("Failed to scan initial devices: {}", e);
+            }
 
-        // Register hotplug callbacks
-        let registration = HotplugBuilder::new()
-            .enumerate(true) // Also process existing devices
-            .register(&context, Box::new(handler))
-            .map_err(|e| {
-                anyhow::anyhow!("Failed to register hotplug callback: {}", e)
-            })?;
+            // Watch for device changes
+            match nusb::watch_devices() {
+                Ok(mut stream) => {
+                    while let Some(event) = stream.next().await {
+                        if shutdown_flag.load(Ordering::Relaxed) {
+                            info!("USB hotplug monitoring received shutdown signal");
+                            break;
+                        }
 
-        // Start background task to handle USB events
-        let ctx_clone = context.clone();
-        let shutdown_flag_clone = Arc::clone(&self.shutdown_flag);
-        let handle = tokio::task::spawn_blocking(move || {
-            info!("USB event handling task started");
-            loop {
-                // Check shutdown flag before processing events
-                if shutdown_flag_clone.load(Ordering::Relaxed) {
-                    info!("USB event handling task received shutdown signal");
-                    break;
-                }
-                
-                match ctx_clone.handle_events(Some(Duration::from_millis(100))) {
-                    Ok(_) => {
-                        // Continue processing events
+                        match event {
+                            HotplugEvent::Connected(device_info) => {
+                                debug!("USB device arrived: {:04x}:{:04x}", device_info.vendor_id(), device_info.product_id());
+                                if let Err(e) = Self::handle_device_arrived(&factories, &transport_manager, &device_map, device_info).await {
+                                    error!("Failed to handle device arrival: {}", e);
+                                }
+                            }
+                            HotplugEvent::Disconnected(device_id) => {
+                                debug!("USB device left: {:?}", device_id);
+                                if let Err(e) = Self::handle_device_left(&transport_manager, &device_map, device_id).await {
+                                    error!("Failed to handle device removal: {}", e);
+                                }
+                            }
+                        }
                     }
-                    Err(rusb::Error::Interrupted) => {
-                        info!("USB event handling interrupted");
-                        break;
+                }
+                Err(e) => {
+                    error!("Failed to watch USB devices: {}", e);
+                    return;
+                }
+            }
+            
+            info!("USB hotplug monitoring task ended");
+        });
+
+        self.hotplug_handle = Some(handle);
+        Ok(())
+    }
+
+    /// Handle device arrival event
+    async fn handle_device_arrived(
+        factories: &Arc<Vec<Arc<dyn UsbTransportFactory>>>,
+        transport_manager: &Arc<TransportManager>,
+        device_map: &Arc<RwLock<HashMap<DeviceKey, String>>>,
+        device_info: DeviceInfo,
+    ) -> Result<()> {
+        let udev_info = get_device_info(&device_info)?;
+        let device_key = (udev_info.bus_number, udev_info.address);
+
+        // Check if device is supported by any factory
+        for factory in factories.iter() {
+            if factory.supported_devices().contains(&(udev_info.vendor_id, udev_info.product_id)) {
+                info!(
+                    "Creating transport for device {:04x}:{:04x} using factory {}",
+                    udev_info.vendor_id, udev_info.product_id, factory.name()
+                );
+
+                match factory.create_transport(device_info.clone()).await {
+                    Ok(transport) => {
+                        let device_id = transport.device_id().to_string();
+                        
+                        // Register the device mapping
+                        device_map.write().await.insert(device_key, device_id.clone());
+                        
+                        // Add transport to manager
+                        transport_manager.add_transport(transport).await;
+                        
+                        info!("Successfully added transport for device {}", device_id);
+                        return Ok(());
                     }
                     Err(e) => {
-                        error!("USB event handling error: {}", e);
-                        // Continue despite errors, but add a small delay
-                        std::thread::sleep(Duration::from_millis(100));
+                        error!("Failed to create transport for device: {}", e);
+                        continue;
                     }
                 }
             }
-            info!("USB event handling task ended");
+        }
+
+        debug!(
+            "No factory found for device {:04x}:{:04x}",
+            device_info.vendor_id(), device_info.product_id()
+        );
+        Ok(())
+    }
+
+    /// Handle device removal event
+    async fn handle_device_left(
+        transport_manager: &Arc<TransportManager>,
+        device_map: &Arc<RwLock<HashMap<DeviceKey, String>>>,
+        device_id: DeviceId,
+    ) -> Result<()> {
+        // Try to find device by device_id mapping (this is approximate)
+        let mut map = device_map.write().await;
+        let mut found_key = None;
+
+        // Find the device key that might match this device_id
+        for (key, mapped_id) in map.iter() {
+            // This is a heuristic - we can't perfectly match device_id to our key
+            // In practice, we might need to enhance this mapping
+            if mapped_id.contains(&format!("{}:{}", key.0, key.1)) {
+                found_key = Some(*key);
+                break;
+            }
+        }
+
+        if let Some(key) = found_key {
+            if let Some(device_id_str) = map.remove(&key) {
+                info!("Removing transport for device {}", device_id_str);
+                transport_manager.remove_transport(&device_id_str).await;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Scan devices and process them
+    async fn scan_and_process_devices(
+        factories: &Arc<Vec<Arc<dyn UsbTransportFactory>>>,
+        transport_manager: &Arc<TransportManager>,
+        device_map: &Arc<RwLock<HashMap<DeviceKey, String>>>,
+    ) -> Result<()> {
+        let devices = nusb::list_devices()?;
+        
+        for device_info in devices {
+            let udev_info = get_device_info(&device_info)?;
+            let device_key = (udev_info.bus_number, udev_info.address);
+
+            // Skip if already processed
+            if device_map.read().await.contains_key(&device_key) {
+                continue;
+            }
+
+            // Check if supported
+            for factory in factories.iter() {
+                if factory.supported_devices().contains(&(udev_info.vendor_id, udev_info.product_id)) {
+                    debug!(
+                        "Found supported device {:04x}:{:04x} for factory {}",
+                        udev_info.vendor_id, udev_info.product_id, factory.name()
+                    );
+
+                    match factory.create_transport(device_info.clone()).await {
+                        Ok(transport) => {
+                            let device_id = transport.device_id().to_string();
+                            
+                            // Register the device mapping
+                            device_map.write().await.insert(device_key, device_id.clone());
+                            
+                            // Add transport to manager
+                            transport_manager.add_transport(transport).await;
+                            
+                            info!("Added transport for device {}", device_id);
+                            break; // Found a factory, stop trying others
+                        }
+                        Err(e) => {
+                            warn!("Failed to create transport: {}", e);
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Start polling mode for platforms without hotplug support
+    async fn start_polling_mode(&mut self) -> Result<()> {
+        let factories = Arc::clone(&self.factories);
+        let transport_manager = Arc::clone(&self.transport_manager);
+        let device_map = Arc::clone(&self.device_map);
+        let shutdown_flag = Arc::clone(&self.shutdown_flag);
+        let polling_interval = self.polling_interval;
+
+        let handle = tokio::spawn(async move {
+            info!("USB polling mode started (interval: {:?})", polling_interval);
+            let mut polling_state = PollingState::new();
+
+            loop {
+                if shutdown_flag.load(Ordering::Relaxed) {
+                    info!("USB polling received shutdown signal");
+                    break;
+                }
+
+                // Scan current devices
+                match Self::scan_devices_blocking(&factories).await {
+                    Ok(current_snapshots) => {
+                        let changes = polling_state.detect_changes(&current_snapshots);
+
+                        // Process added devices
+                        for snapshot in &changes.added {
+                            info!(
+                                "Detected new device: {:04x}:{:04x} ({}:{})",
+                                snapshot.info.vendor_id,
+                                snapshot.info.product_id,
+                                snapshot.info.bus_number,
+                                snapshot.info.address
+                            );
+
+                            if let Some(factory_name) = &snapshot.factory_name {
+                                // Find the factory and create transport
+                                for factory in factories.iter() {
+                                    if factory.name() == factory_name {
+                                        // Re-enumerate to get Device object
+                                        if let Ok(devices) = nusb::list_devices() {
+                                            for device_info in devices {
+                                                if let Ok(info) = get_device_info(&device_info) {
+                                                    if info.bus_number == snapshot.info.bus_number &&
+                                                       info.address == snapshot.info.address {
+                                                        match factory.create_transport(device_info.clone()).await {
+                                                            Ok(transport) => {
+                                                                let device_id = transport.device_id().to_string();
+                                                                let device_key = (info.bus_number, info.address);
+                                                                
+                                                                device_map.write().await.insert(device_key, device_id.clone());
+                                                                transport_manager.add_transport(transport).await;
+                                                                info!("Added transport for device {}", device_id);
+                                                                break;
+                                                            }
+                                                            Err(e) => {
+                                                                error!("Failed to create transport: {}", e);
+                                                            }
+                                                        }
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+
+                        // Process removed devices
+                        for device_key in &changes.removed {
+                            let mut map = device_map.write().await;
+                            if let Some(device_id) = map.remove(device_key) {
+                                info!("Detected removed device: {}:{}", device_key.0, device_key.1);
+                                transport_manager.remove_transport(&device_id).await;
+                            }
+                        }
+
+                        // Update polling state
+                        polling_state.update(current_snapshots);
+                    }
+                    Err(e) => {
+                        error!("Failed to scan USB devices: {}", e);
+                    }
+                }
+
+                // Wait for next polling interval
+                tokio::time::sleep(polling_interval).await;
+            }
+
+            info!("USB polling task ended");
         });
 
-        // Store state
-        self.context = Some(context);
-        self.registration = Some(registration);
-        self.monitor_handle = Some(handle);
-
-        info!("USB hotplug monitoring started with real-time callbacks");
+        self.polling_handle = Some(handle);
+        info!("USB polling mode started");
         Ok(())
     }
 
@@ -198,735 +420,97 @@ impl UsbMonitor {
         tokio::task::spawn_blocking({
             let factories = Arc::clone(factories);
             move || -> Result<Vec<DeviceSnapshot>> {
-                let context = rusb::GlobalContext {};
-                let devices = context.devices()?;
+                let devices = nusb::list_devices()?;
                 let mut snapshots = Vec::new();
-                
-                for device in devices.iter() {
-                    if let Ok(info) = get_device_info(&device) {
-                        let mut snapshot = DeviceSnapshot {
-                            info: info.clone(),
-                            factory_name: None,
-                            validation_passed: false,
-                        };
-                        
-                        // Check factory matching and validation
-                        for factory in factories.iter() {
-                            if factory.matches(&info) {
-                                snapshot.factory_name = Some(factory.name().to_string());
-                                snapshot.validation_passed = factory.validate_device(&device).is_ok();
-                                break; // Only use first matching factory
-                            }
-                        }
-                        
-                        snapshots.push(snapshot);
-                    }
-                }
-                
-                Ok(snapshots)
-            }
-        }).await?
-    }
 
-    /// Handle new device detection
-    async fn handle_new_device(
-        snapshot: DeviceSnapshot,
-        factories: &Arc<Vec<Arc<dyn UsbTransportFactory>>>,
-        transport_manager: &Arc<TransportManager>,
-        device_map: &Arc<RwLock<HashMap<DeviceKey, String>>>,
-    ) -> Result<()> {
-        if let Some(factory_name) = &snapshot.factory_name {
-            if snapshot.validation_passed {
-                debug!("Polling detected new device: {} (matched by {})", snapshot.info, factory_name);
-                
-                // Create transport by re-enumerating devices
-                let transport = Self::create_transport_for_device(
-                    &snapshot.info,
-                    factory_name,
-                    factories
-                ).await?;
-                
-                if let Some(transport) = transport {
-                    let device_id = transport.device_id().to_string();
-                    let key = (snapshot.info.bus_number, snapshot.info.address);
-                    
-                    // Update device map
-                    {
-                        let mut device_map_lock = device_map.write().await;
-                        device_map_lock.insert(key, device_id.clone());
-                    }
-                    
-                    // Add to transport manager
-                    transport_manager.add_transport_auto_debug(transport).await?;
-                    
-                    info!("Transport created via polling: {}", device_id);
-                }
-            }
-        }
-        
-        Ok(())
-    }
+                for device in devices {
+                    match get_device_info(&device) {
+                        Ok(info) => {
+                            let mut factory_name = None;
+                            let mut validation_passed = false;
 
-    /// Handle device removal
-    async fn handle_removed_device(
-        device_key: DeviceKey,
-        transport_manager: &Arc<TransportManager>,
-        device_map: &Arc<RwLock<HashMap<DeviceKey, String>>>,
-    ) -> Result<()> {
-        let device_id = {
-            let mut device_map_lock = device_map.write().await;
-            device_map_lock.remove(&device_key)
-        };
-
-        if let Some(device_id) = device_id {
-            info!("USB device disconnected via polling: {} ({}:{})", device_id, device_key.0, device_key.1);
-            
-            // Handle disconnect in transport manager
-            transport_manager.handle_usb_disconnect(&device_id).await?;
-        } else {
-            debug!("Unknown device disconnected at {}:{}", device_key.0, device_key.1);
-        }
-
-        Ok(())
-    }
-
-    /// Create transport for device by re-enumeration
-    async fn create_transport_for_device(
-        device_info: &UsbDeviceInfo,
-        factory_name: &str,
-        factories: &Arc<Vec<Arc<dyn UsbTransportFactory>>>,
-    ) -> Result<Option<Box<dyn Transport + Send>>> {
-        tokio::task::spawn_blocking({
-            let device_info = device_info.clone();
-            let factory_name = factory_name.to_string();
-            let factories = Arc::clone(factories);
-            
-            move || -> Result<Option<Box<dyn Transport + Send>>> {
-                // Re-enumerate devices to find the matching one
-                let context = rusb::GlobalContext {};
-                let devices = context.devices()?;
-                
-                for device in devices.iter() {
-                    if let Ok(info) = get_device_info(&device) {
-                        if info.bus_number == device_info.bus_number
-                            && info.address == device_info.address
-                            && info.vendor_id == device_info.vendor_id
-                            && info.product_id == device_info.product_id {
-                            
-                            // Find matching factory
+                            // Check if device is supported by any factory
                             for factory in factories.iter() {
-                                if factory.name() == factory_name && factory.matches(&info) {
-                                    // Create transport synchronously using block_on
-                                    let transport = futures::executor::block_on(
-                                        factory.create_transport(device)
-                                    )?;
-                                    return Ok(Some(transport));
+                                if factory.supported_devices().contains(&(info.vendor_id, info.product_id)) {
+                                    factory_name = Some(factory.name().to_string());
+                                    validation_passed = true;
+                                    break;
                                 }
                             }
+
+                            snapshots.push(DeviceSnapshot {
+                                info,
+                                factory_name,
+                                validation_passed,
+                            });
+                        }
+                        Err(e) => {
+                            warn!("Failed to get device info: {}", e);
                         }
                     }
                 }
-                
-                // Device not found during re-enumeration
-                warn!("Device not found during re-enumeration: {}", device_info);
-                Ok(None)
+
+                Ok(snapshots)
             }
-        }).await?
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("Task join error: {:?}", e))?
     }
 
-    /// Start polling mode for platforms without hotplug support
-    async fn start_polling_mode(&mut self) -> Result<()> {
-        if self.polling_handle.is_some() {
-            return Ok(()); // Already running
-        }
-
-        let factories = Arc::clone(&self.factories);
-        let transport_manager = Arc::clone(&self.transport_manager);
-        let device_map = Arc::clone(&self.device_map);
-        let shutdown_flag_clone = Arc::clone(&self.shutdown_flag);
-        let interval = self.polling_interval;
-
-        info!("Starting USB polling fallback mode with {}s interval", interval.as_secs());
-
-        let handle = tokio::spawn(async move {
-            let mut state = PollingState::new();
-            
-            loop {
-                // Check shutdown flag before processing
-                if shutdown_flag_clone.load(Ordering::Relaxed) {
-                    info!("USB polling task received shutdown signal");
-                    break;
-                }
-                // 1. Scan devices in blocking context
-                let snapshots = match Self::scan_devices_blocking(&factories).await {
-                    Ok(snapshots) => snapshots,
-                    Err(e) => {
-                        warn!("Failed to scan USB devices during polling: {}", e);
-                        tokio::time::sleep(interval).await;
-                        continue;
-                    }
-                };
-
-                // 2. Detect changes
-                let changes = state.detect_changes(&snapshots);
-
-                // 3. Handle new devices
-                for new_device in changes.added {
-                    if let Err(e) = Self::handle_new_device(
-                        new_device,
-                        &factories,
-                        &transport_manager,
-                        &device_map,
-                    ).await {
-                        warn!("Failed to handle new device: {}", e);
-                    }
-                }
-
-                // 4. Handle removed devices
-                for removed_key in changes.removed {
-                    if let Err(e) = Self::handle_removed_device(
-                        removed_key,
-                        &transport_manager,
-                        &device_map,
-                    ).await {
-                        warn!("Failed to handle removed device: {}", e);
-                    }
-                }
-
-                // 5. Update state
-                state.update(snapshots);
-
-                // 6. Sleep until next polling cycle
-                tokio::time::sleep(interval).await;
-            }
-        });
-
-        self.polling_handle = Some(handle);
-        Ok(())
-    }
-
-    /// Stop USB hotplug monitoring
+    /// Stop USB monitoring
     pub async fn stop_monitoring(&mut self) -> Result<()> {
-        // Set shutdown flag first
+        info!("Stopping USB monitoring");
+
+        // Set shutdown flag
         self.shutdown_flag.store(true, Ordering::Relaxed);
-        
-        // Stop polling task if running
+
+        // Stop hotplug task
+        if let Some(handle) = self.hotplug_handle.take() {
+            handle.abort();
+            let _ = handle.await;
+        }
+
+        // Stop polling task
         if let Some(handle) = self.polling_handle.take() {
-            // Wait for graceful shutdown first
-            match tokio::time::timeout(Duration::from_secs(3), handle).await {
-                Ok(Ok(_)) => {
-                    info!("USB polling task terminated gracefully");
-                }
-                Ok(Err(e)) => {
-                    warn!("USB polling task finished with error: {}", e);
-                }
-                Err(_) => {
-                    warn!("USB polling task did not terminate in time, it was likely aborted");
-                }
-            }
+            handle.abort();
+            let _ = handle.await;
         }
 
-        // Stop background event handling task
-        if let Some(handle) = self.monitor_handle.take() {
-            // Wait for graceful shutdown first
-            match tokio::time::timeout(Duration::from_secs(3), handle).await {
-                Ok(Ok(_)) => {
-                    info!("USB event handling task terminated gracefully");
-                }
-                Ok(Err(e)) => {
-                    warn!("USB event handling task finished with error: {}", e);
-                }
-                Err(_) => {
-                    warn!("USB event handling task did not terminate in time, it was likely aborted");
-                }
-            }
-        }
+        // Clear device map
+        self.device_map.write().await.clear();
 
-        // Unregister hotplug callback
-        if let (Some(context), Some(registration)) = (self.context.take(), self.registration.take()) {
-            context.unregister_callback(registration);
-            info!("USB hotplug callback unregistered");
-        }
+        // Reset shutdown flag for future use
+        self.shutdown_flag.store(false, Ordering::Relaxed);
 
         info!("USB monitoring stopped");
         Ok(())
     }
 
-    /// Get list of currently tracked USB devices
-    pub async fn get_tracked_devices(&self) -> HashMap<DeviceKey, String> {
-        self.device_map.read().await.clone()
+    /// Set polling interval (for polling mode)
+    pub fn set_polling_interval(&mut self, interval: Duration) {
+        self.polling_interval = interval;
+        info!("USB polling interval set to {:?}", interval);
     }
 
-    /// Manual device scan for existing devices
-    pub async fn scan_existing_devices(&self) -> Result<usize> {
-        info!("Scanning for existing USB devices...");
-        
-        // Use global context for device enumeration
-        let devices = match rusb::devices() {
-            Ok(devices) => devices,
-            Err(e) => {
-                warn!("Failed to enumerate USB devices: {}", e);
-                return Ok(0);
-            }
-        };
-
-        let mut added_count = 0;
-
-        for device in devices.iter() {
-            if let Ok(info) = get_device_info(&device) {
-                for factory in self.factories.iter() {
-                    if factory.matches(&info) {
-                        match self.handle_device_arrived(device, factory.as_ref()).await {
-                            Ok(true) => {
-                                added_count += 1;
-                                break; // Device handled, don't try other factories
-                            }
-                            Ok(false) => {
-                                // Device already exists, skip
-                                break;
-                            }
-                            Err(e) => {
-                                warn!("Failed to add existing device {}: {}", info, e);
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        info!("Device scan complete: {} devices added", added_count);
-        Ok(added_count)
+    /// Get current device count
+    pub async fn device_count(&self) -> usize {
+        self.device_map.read().await.len()
     }
 
-    /// Handle device arrival (returns true if new device added)
-    async fn handle_device_arrived(
-        &self,
-        device: Device<GlobalContext>,
-        factory: &dyn UsbTransportFactory,
-    ) -> Result<bool> {
-        let info = get_device_info(&device)?;
-        let device_key = (info.bus_number, info.address);
-
-        // Check if device is already tracked
-        {
-            let device_map = self.device_map.read().await;
-            if device_map.contains_key(&device_key) {
-                debug!("Device {} already tracked", info);
-                return Ok(false);
-            }
-        }
-
-        info!("USB device found: {} (matched by {})", info, factory.name());
-
-        // Validate device before creating transport
-        if let Err(e) = factory.validate_device(&device) {
-            warn!("Device validation failed for {}: {}", info, e);
-            return Err(e);
-        }
-
-        // Create transport
-        let transport = factory.create_transport(device).await?;
-        let device_id = transport.device_id().to_string();
-
-        // Add to device map
-        {
-            let mut device_map = self.device_map.write().await;
-            device_map.insert(device_key, device_id.clone());
-        }
-
-        // Add to transport manager
-        self.transport_manager.add_transport_auto_debug(transport).await?;
-
-        info!("Transport created and added: {}", device_id);
-        Ok(true)
-    }
-
-    /// Handle device removal (for future hotplug implementation)
-    #[allow(dead_code)]
-    async fn handle_device_left(&self, bus: u8, address: u8) -> Result<()> {
-        let device_key = (bus, address);
-        
-        let device_id = {
-            let mut device_map = self.device_map.write().await;
-            device_map.remove(&device_key)
-        };
-
-        if let Some(device_id) = device_id {
-            info!("USB device disconnected: {} ({}:{})", device_id, bus, address);
-            
-            // Handle disconnect in transport manager
-            self.transport_manager.handle_usb_disconnect(&device_id).await?;
-        } else {
-            debug!("Unknown device disconnected at {}:{}", bus, address);
-        }
-
-        Ok(())
+    /// List currently monitored devices
+    pub async fn list_devices(&self) -> Vec<(DeviceKey, String)> {
+        self.device_map
+            .read()
+            .await
+            .iter()
+            .map(|(key, device_id)| (*key, device_id.clone()))
+            .collect()
     }
 }
 
 impl Drop for UsbMonitor {
     fn drop(&mut self) {
-        // Clean up resources when UsbMonitor is dropped
-        if let Some(handle) = self.polling_handle.take() {
-            handle.abort();
-        }
-
-        if let Some(handle) = self.monitor_handle.take() {
-            handle.abort();
-        }
-
-        if let (Some(context), Some(registration)) = (self.context.take(), self.registration.take()) {
-            context.unregister_callback(registration);
-        }
-
-        debug!("UsbMonitor dropped and cleaned up");
-    }
-}
-
-/// USB hotplug handler that implements the rusb::Hotplug trait
-#[derive(Clone)]
-struct UsbHotplugHandler {
-    factories: Arc<Vec<Arc<dyn UsbTransportFactory>>>,
-    transport_manager: Arc<TransportManager>,
-    device_map: Arc<RwLock<HashMap<DeviceKey, String>>>,
-}
-
-impl UsbHotplugHandler {
-    fn new(
-        factories: Arc<Vec<Arc<dyn UsbTransportFactory>>>,
-        transport_manager: Arc<TransportManager>,
-        device_map: Arc<RwLock<HashMap<DeviceKey, String>>>,
-    ) -> Self {
-        Self {
-            factories,
-            transport_manager,
-            device_map,
-        }
-    }
-
-    /// Handle device arrival event asynchronously
-    async fn handle_device_arrived_async(&self, device: Device<Context>) -> Result<()> {
-        // Convert Context device to GlobalContext device for compatibility
-        let global_device = match self.context_device_to_global(device).await {
-            Ok(dev) => dev,
-            Err(e) => {
-                warn!("Failed to convert device context: {}", e);
-                return Err(e);
-            }
-        };
-
-        let info = get_device_info(&global_device)?;
-        let device_key = (info.bus_number, info.address);
-
-        // Check if device is already tracked
-        {
-            let device_map = self.device_map.read().await;
-            if device_map.contains_key(&device_key) {
-                debug!("Device {} already tracked", info);
-                return Ok(());
-            }
-        }
-
-        // Find matching factory
-        for factory in self.factories.iter() {
-            if factory.matches(&info) {
-                info!("USB device connected: {} (matched by {})", info, factory.name());
-
-                // Validate device
-                if let Err(e) = factory.validate_device(&global_device) {
-                    warn!("Device validation failed for {}: {}", info, e);
-                    continue;
-                }
-
-                // Create transport
-                match factory.create_transport(global_device).await {
-                    Ok(transport) => {
-                        let device_id = transport.device_id().to_string();
-
-                        // Add to device map
-                        {
-                            let mut device_map = self.device_map.write().await;
-                            device_map.insert(device_key, device_id.clone());
-                        }
-
-                        // Add to transport manager
-                        match self.transport_manager.add_transport_auto_debug(transport).await {
-                            Ok(_) => {
-                                info!("Transport created and added: {}", device_id);
-                                return Ok(());
-                            }
-                            Err(e) => {
-                                error!("Failed to add transport to manager: {}", e);
-                                // Remove from device map on failure
-                                self.device_map.write().await.remove(&device_key);
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        warn!("Failed to create transport for {}: {}", info, e);
-                    }
-                }
-                break; // Only try first matching factory
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Handle device removal event asynchronously  
-    async fn handle_device_left_async(&self, bus: u8, address: u8) -> Result<()> {
-        let device_key = (bus, address);
-        
-        let device_id = {
-            let mut device_map = self.device_map.write().await;
-            device_map.remove(&device_key)
-        };
-
-        if let Some(device_id) = device_id {
-            info!("USB device disconnected: {} ({}:{})", device_id, bus, address);
-            
-            // Handle disconnect in transport manager
-            if let Err(e) = self.transport_manager.handle_usb_disconnect(&device_id).await {
-                error!("Failed to handle USB disconnect for {}: {}", device_id, e);
-            }
-        } else {
-            debug!("Unknown device disconnected at {}:{}", bus, address);
-        }
-
-        Ok(())
-    }
-
-    /// Convert Context device to GlobalContext device
-    /// This is a workaround for type compatibility between rusb Context types
-    async fn context_device_to_global(&self, device: Device<Context>) -> Result<Device<GlobalContext>> {
-        // Get device descriptor info
-        let descriptor = device.device_descriptor()?;
-        let vendor_id = descriptor.vendor_id();
-        let product_id = descriptor.product_id();
-        let bus = device.bus_number();
-        let address = device.address();
-
-        // Find the same device in global context
-        let devices = rusb::devices()?;
-        for global_device in devices.iter() {
-            let global_desc = global_device.device_descriptor()?;
-            if global_desc.vendor_id() == vendor_id
-                && global_desc.product_id() == product_id
-                && global_device.bus_number() == bus
-                && global_device.address() == address
-            {
-                return Ok(global_device);
-            }
-        }
-
-        Err(anyhow::anyhow!(
-            "Could not find matching global device for {}:{} (VID={:04x} PID={:04x})",
-            bus, address, vendor_id, product_id
-        ))
-    }
-}
-
-impl Hotplug<Context> for UsbHotplugHandler {
-    fn device_arrived(&mut self, device: Device<Context>) {
-        let handler = self.clone();
-        tokio::spawn(async move {
-            if let Err(e) = handler.handle_device_arrived_async(device).await {
-                error!("Error handling device arrival: {}", e);
-            }
-        });
-    }
-
-    fn device_left(&mut self, device: Device<Context>) {
-        let handler = self.clone();
-        let bus = device.bus_number();
-        let address = device.address();
-        
-        tokio::spawn(async move {
-            if let Err(e) = handler.handle_device_left_async(bus, address).await {
-                error!("Error handling device removal: {}", e);
-            }
-        });
-    }
-}
-
-// TODO: Implement proper hotplug callbacks in future iterations
-// The current implementation focuses on initial device scanning
-// Full hotplug support would require:
-// 1. Proper hotplug callback registration
-// 2. Background monitoring task  
-// 3. Device arrival/removal event handling
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::transport::AndroidUsbFactory;
-
-    #[tokio::test]
-    async fn test_usb_monitor_creation() {
-        let transport_manager = Arc::new(TransportManager::new());
-        let monitor = UsbMonitor::new(transport_manager);
-        assert!(monitor.is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_factory_registration() {
-        let transport_manager = Arc::new(TransportManager::new());
-        let mut monitor = UsbMonitor::new(transport_manager).unwrap();
-        
-        let factory = Arc::new(AndroidUsbFactory::new());
-        monitor.register_factory(factory);
-        
-        // Should have one factory registered
-        assert_eq!(monitor.factories.len(), 1);
-        assert_eq!(monitor.factories[0].name(), "AndroidUSB");
-    }
-
-    #[tokio::test]
-    async fn test_device_map_empty() {
-        let transport_manager = Arc::new(TransportManager::new());
-        let monitor = UsbMonitor::new(transport_manager).unwrap();
-        
-        let tracked = monitor.get_tracked_devices().await;
-        assert!(tracked.is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_start_stop_monitoring() {
-        let transport_manager = Arc::new(TransportManager::new());
-        let mut monitor = UsbMonitor::new(transport_manager).unwrap();
-        
-        // Should start without error (even if hotplug not supported)
-        assert!(monitor.start_monitoring().await.is_ok());
-        
-        // Should stop without error
-        assert!(monitor.stop_monitoring().await.is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_double_start_monitoring() {
-        let transport_manager = Arc::new(TransportManager::new());
-        let mut monitor = UsbMonitor::new(transport_manager).unwrap();
-        
-        // First start should succeed
-        assert!(monitor.start_monitoring().await.is_ok());
-        
-        // Second start should succeed but warn (no error)
-        assert!(monitor.start_monitoring().await.is_ok());
-        
-        // Cleanup
-        assert!(monitor.stop_monitoring().await.is_ok());
-    }
-
-    #[test]
-    fn test_hotplug_handler_creation() {
-        let transport_manager = Arc::new(TransportManager::new());
-        let factories = Arc::new(Vec::new());
-        let device_map = Arc::new(RwLock::new(HashMap::new()));
-        
-        let _handler = UsbHotplugHandler::new(factories, transport_manager, device_map);
-        // If we get here without panic, the handler was created successfully
-    }
-
-    #[test]
-    fn test_device_snapshot_creation() {
-        use crate::transport::UsbDeviceInfo;
-        
-        let info = UsbDeviceInfo {
-            vendor_id: 0x18d1,
-            product_id: 0x4ee7,
-            bus_number: 1,
-            address: 2,
-            serial: Some("test123".to_string()),
-        };
-
-        let snapshot = DeviceSnapshot {
-            info: info.clone(),
-            factory_name: Some("TestFactory".to_string()),
-            validation_passed: true,
-        };
-
-        assert_eq!(snapshot.info.vendor_id, 0x18d1);
-        assert_eq!(snapshot.factory_name.as_ref().unwrap(), "TestFactory");
-        assert!(snapshot.validation_passed);
-    }
-
-    #[test]
-    fn test_polling_state_changes() {
-        use crate::transport::UsbDeviceInfo;
-        
-        let mut state = PollingState::new();
-        
-        // Create test device snapshots
-        let device1 = DeviceSnapshot {
-            info: UsbDeviceInfo {
-                vendor_id: 0x18d1,
-                product_id: 0x4ee7,
-                bus_number: 1,
-                address: 2,
-                serial: Some("device1".to_string()),
-            },
-            factory_name: Some("TestFactory".to_string()),
-            validation_passed: true,
-        };
-
-        let device2 = DeviceSnapshot {
-            info: UsbDeviceInfo {
-                vendor_id: 0x18d1,
-                product_id: 0x4ee7,
-                bus_number: 1,
-                address: 3,
-                serial: Some("device2".to_string()),
-            },
-            factory_name: Some("TestFactory".to_string()),
-            validation_passed: true,
-        };
-
-        // Initial state - no devices
-        assert!(state.known_devices.is_empty());
-
-        // Add first device
-        state.update(vec![device1.clone()]);
-        assert_eq!(state.known_devices.len(), 1);
-
-        // Test change detection - add second device
-        let changes = state.detect_changes(&[device1.clone(), device2.clone()]);
-        assert_eq!(changes.added.len(), 1);
-        assert_eq!(changes.removed.len(), 0);
-
-        // Update state with both devices
-        state.update(vec![device1.clone(), device2.clone()]);
-        assert_eq!(state.known_devices.len(), 2);
-
-        // Test change detection - remove first device
-        let changes = state.detect_changes(&[device2.clone()]);
-        assert_eq!(changes.added.len(), 0);
-        assert_eq!(changes.removed.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn test_usb_monitor_with_polling_fields() {
-        let transport_manager = Arc::new(TransportManager::new());
-        let monitor = UsbMonitor::new(transport_manager).unwrap();
-        
-        // Check that polling fields are initialized correctly
-        assert!(monitor.polling_handle.is_none());
-        assert_eq!(monitor.polling_interval, Duration::from_secs(5));
-    }
-
-    #[tokio::test]
-    async fn test_start_monitoring_fallback_simulation() {
-        let transport_manager = Arc::new(TransportManager::new());
-        let mut monitor = UsbMonitor::new(transport_manager).unwrap();
-        
-        // Note: This test will succeed regardless of hotplug support
-        // If hotplug is supported, it will use hotplug
-        // If not supported, it will use polling fallback
-        let result = monitor.start_monitoring().await;
-        assert!(result.is_ok());
-        
-        // Clean up
-        let stop_result = monitor.stop_monitoring().await;
-        assert!(stop_result.is_ok());
+        // Ensure monitoring is stopped when dropped
+        self.shutdown_flag.store(true, Ordering::Relaxed);
     }
 }

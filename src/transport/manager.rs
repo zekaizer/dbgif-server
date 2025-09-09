@@ -35,7 +35,11 @@ impl TransportManager {
         transport.connect().await?;
 
         // Check current connection status to determine if polling is needed
-        let status = transport.get_connection_status().await;
+        let status = if transport.is_connected().await {
+            ConnectionStatus::Ready
+        } else {
+            ConnectionStatus::Disconnected
+        };
 
         // Add transport to collection
         self.transports
@@ -206,7 +210,11 @@ impl TransportManager {
 
                 let transports_read = transports.read().await;
                 if let Some(transport) = transports_read.get(&device_id_clone) {
-                    let status = transport.get_connection_status().await;
+                    let status = if transport.is_connected().await {
+                        ConnectionStatus::Ready
+                    } else {
+                        ConnectionStatus::Disconnected
+                    };
 
                     // Check for status changes
                     if status != last_status {
