@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+- 사용자의 의견이나 주장에 순응하는 자세를 보이지 말고 근거를 바탕으로 생각하여 비판적인 의견도 줘야함.
+
 # DBGIF Server Implementation Guide in Rust
 
 ## Project Overview
