@@ -498,6 +498,275 @@ impl LoopbackTest {
         Ok(())
     }
 
+    /// Run bidirectional test between device A and device B
+    pub async fn run_bidirectional(&mut self, device_a: &str, device_b: &str, config: &TestConfig) -> Result<()> {
+        info!("Starting bidirectional test: {} (client) <-> {} (server)", device_a, device_b);
+        
+        // Create separate statistics for each direction
+        let stats_a_to_b = Arc::new(TestStats::new(config.csv_output));
+        let stats_b_to_a = Arc::new(TestStats::new(config.csv_output));
+        
+        if config.csv_output {
+            println!("direction,timestamp_ms,bytes,latency_us,success");
+        }
+
+        // Start statistics reporting
+        let stats_a_clone = Arc::clone(&stats_a_to_b);
+        let stats_b_clone = Arc::clone(&stats_b_to_a);
+        let stats_task = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(5));
+            loop {
+                interval.tick().await;
+                info!("=== A->B Stats ===");
+                stats_a_clone.print_stats();
+                info!("=== B->A Stats ===");
+                stats_b_clone.print_stats();
+            }
+        });
+
+        let test_duration = if config.duration > 0 {
+            Duration::from_secs(config.duration)
+        } else {
+            Duration::from_secs(u64::MAX)
+        };
+
+        // Task 1: A->B->A communication (A as client, B as server)
+        let client_clone = DbgifClient::new(self.client.server_addr.clone());
+        let config_clone = TestConfig {
+            duration: config.duration,
+            size: config.size,
+            delay: config.delay,
+            pattern: config.pattern.clone(),
+            csv_output: config.csv_output,
+        };
+        let stats_a_clone = Arc::clone(&stats_a_to_b);
+        let device_a_str = device_a.to_string();
+        let device_b_str = device_b.to_string();
+
+        let task_a_to_b = tokio::spawn(async move {
+            if let Err(e) = Self::run_client_to_server(&client_clone, &device_a_str, &device_b_str, &config_clone, stats_a_clone, "A->B").await {
+                error!("A->B test failed: {}", e);
+            }
+        });
+
+        // Task 2: B->A->B communication (B as client, A as server)  
+        let client_clone2 = DbgifClient::new(self.client.server_addr.clone());
+        let config_clone2 = TestConfig {
+            duration: config.duration,
+            size: config.size,
+            delay: config.delay,
+            pattern: config.pattern.clone(),
+            csv_output: config.csv_output,
+        };
+        let stats_b_clone = Arc::clone(&stats_b_to_a);
+        let device_a_str2 = device_a.to_string();
+        let device_b_str2 = device_b.to_string();
+
+        let task_b_to_a = tokio::spawn(async move {
+            // Wait a bit to let A->B task start first
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            if let Err(e) = Self::run_client_to_server(&client_clone2, &device_b_str2, &device_a_str2, &config_clone2, stats_b_clone, "B->A").await {
+                error!("B->A test failed: {}", e);
+            }
+        });
+
+        // Wait for test duration
+        tokio::time::sleep(test_duration).await;
+        info!("Test duration reached, stopping...");
+
+        // Cancel all tasks
+        task_a_to_b.abort();
+        task_b_to_a.abort();
+        stats_task.abort();
+
+        // Print final summary
+        info!("=== BIDIRECTIONAL TEST SUMMARY ===");
+        info!("=== A->B Direction ===");
+        stats_a_to_b.print_summary();
+        info!("=== B->A Direction ===");
+        stats_b_to_a.print_summary();
+
+        Ok(())
+    }
+
+    /// Run client to server test (one direction of bidirectional test)
+    async fn run_client_to_server(
+        client: &DbgifClient,
+        client_device: &str,
+        server_device: &str,
+        config: &TestConfig,
+        stats: Arc<TestStats>,
+        direction: &str,
+    ) -> Result<()> {
+        info!("Starting {} test: {} -> {}", direction, client_device, server_device);
+        
+        let mut stream = client.select_device(client_device).await?;
+        let start = Instant::now();
+        let test_duration = if config.duration > 0 {
+            Duration::from_secs(config.duration)
+        } else {
+            Duration::from_secs(u64::MAX)
+        };
+
+        while start.elapsed() < test_duration {
+            // Generate test data
+            let test_data = Self::generate_test_data_static(config.size, &config.pattern);
+            let request_start = Instant::now();
+
+            // Open shell:echo service
+            let local_id = 2;
+            let echo_service = b"shell:echo".to_vec();
+            let open_msg = Message::new(Command::Open, local_id, 0, echo_service);
+            
+            match Self::send_message_static(client, &mut stream, &open_msg).await {
+                Ok(_) => {},
+                Err(e) => {
+                    warn!("{} - Failed to send OPEN: {}", direction, e);
+                    stats.record_error();
+                    if config.delay > 0 {
+                        tokio::time::sleep(Duration::from_millis(config.delay)).await;
+                    }
+                    continue;
+                }
+            }
+            
+            // Wait for OKAY response
+            match Self::receive_message_static(client, &mut stream).await {
+                Ok(okay_response) => {
+                    if okay_response.command != Command::Okay {
+                        warn!("{} - Expected OKAY, got {:?}", direction, okay_response.command);
+                        stats.record_error();
+                        if config.delay > 0 {
+                            tokio::time::sleep(Duration::from_millis(config.delay)).await;
+                        }
+                        continue;
+                    }
+                    
+                    let remote_id = okay_response.arg0;
+                    
+                    // Send test data
+                    let write_msg = Message::new(Command::Write, local_id, remote_id, test_data.clone());
+                    if let Err(e) = Self::send_message_static(client, &mut stream, &write_msg).await {
+                        warn!("{} - Failed to send WRITE: {}", direction, e);
+                        stats.record_error();
+                        if config.delay > 0 {
+                            tokio::time::sleep(Duration::from_millis(config.delay)).await;
+                        }
+                        continue;
+                    }
+                    
+                    // Wait for OKAY acknowledgment
+                    match Self::receive_message_static(client, &mut stream).await {
+                        Ok(ack) => {
+                            if ack.command != Command::Okay {
+                                warn!("{} - Expected OKAY for WRITE, got {:?}", direction, ack.command);
+                                stats.record_error();
+                                if config.delay > 0 {
+                                    tokio::time::sleep(Duration::from_millis(config.delay)).await;
+                                }
+                                continue;
+                            }
+                        }
+                        Err(e) => {
+                            warn!("{} - Failed to receive WRITE ACK: {}", direction, e);
+                            stats.record_error();
+                            if config.delay > 0 {
+                                tokio::time::sleep(Duration::from_millis(config.delay)).await;
+                            }
+                            continue;
+                        }
+                    }
+                    
+                    // Wait for echo response
+                    match Self::receive_message_static(client, &mut stream).await {
+                        Ok(echo_response) => {
+                            if echo_response.command == Command::Write {
+                                // Send OKAY acknowledgment for echo response
+                                let ack_msg = Message::new(Command::Okay, echo_response.arg1, echo_response.arg0, Vec::new());
+                                let _ = Self::send_message_static(client, &mut stream, &ack_msg).await;
+                                
+                                // Verify data integrity
+                                if echo_response.data.len() == test_data.len() {
+                                    let latency = request_start.elapsed();
+                                    stats.record_success(config.size, latency);
+                                    
+                                    if config.csv_output {
+                                        let timestamp_ms = start.elapsed().as_millis();
+                                        println!("{},{},{},{},true", direction, timestamp_ms, config.size, latency.as_micros());
+                                    }
+                                } else {
+                                    warn!("{} - Echo data size mismatch: {} != {}", direction, echo_response.data.len(), test_data.len());
+                                    stats.record_error();
+                                    if config.csv_output {
+                                        let timestamp_ms = start.elapsed().as_millis();
+                                        println!("{},{},0,0,false", direction, timestamp_ms);
+                                    }
+                                }
+                            } else {
+                                warn!("{} - Expected WRITE echo, got {:?}", direction, echo_response.command);
+                                stats.record_error();
+                                if config.csv_output {
+                                    let timestamp_ms = start.elapsed().as_millis();
+                                    println!("{},{},0,0,false", direction, timestamp_ms);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            warn!("{} - Failed to receive echo response: {}", direction, e);
+                            stats.record_error();
+                            if config.csv_output {
+                                let timestamp_ms = start.elapsed().as_millis();
+                                println!("{},{},0,0,false", direction, timestamp_ms);
+                            }
+                        }
+                    }
+                    
+                    // Close the stream
+                    let close_msg = Message::new(Command::Close, local_id, remote_id, Vec::new());
+                    let _ = Self::send_message_static(client, &mut stream, &close_msg).await;
+                }
+                Err(e) => {
+                    warn!("{} - Failed to receive OKAY: {}", direction, e);
+                    stats.record_error();
+                    if config.csv_output {
+                        let timestamp_ms = start.elapsed().as_millis();
+                        println!("{},{},0,0,false", direction, timestamp_ms);
+                    }
+                }
+            }
+
+            if config.delay > 0 {
+                tokio::time::sleep(Duration::from_millis(config.delay)).await;
+            }
+        }
+
+        info!("{} test completed", direction);
+        Ok(())
+    }
+
+    /// Static helper for sending messages
+    async fn send_message_static(client: &DbgifClient, stream: &mut TcpStream, message: &Message) -> Result<()> {
+        client.send_message(stream, message).await
+    }
+
+    /// Static helper for receiving messages
+    async fn receive_message_static(client: &DbgifClient, stream: &mut TcpStream) -> Result<Message> {
+        client.receive_message(stream).await
+    }
+
+    /// Static helper for generating test data
+    fn generate_test_data_static(size: usize, pattern: &TestPattern) -> Vec<u8> {
+        match pattern {
+            TestPattern::Echo => vec![0xAA; size],
+            TestPattern::Bulk => vec![0xBB; size],
+            TestPattern::Random => {
+                use rand::Rng;
+                let mut rng = rand::thread_rng();
+                (0..size).map(|_| rng.gen::<u8>()).collect()
+            }
+        }
+    }
+
     /// Perform single echo test
     async fn test_echo(&self, stream: &mut TcpStream, config: &TestConfig) -> Result<Duration> {
         let test_data = self.generate_test_data(config.size, &config.pattern);
@@ -589,6 +858,7 @@ pub struct TestConfig {
     pub size: usize,
     pub delay: u64,
     pub pattern: TestPattern,
+    pub csv_output: bool,
 }
 
 #[tokio::main]
@@ -632,18 +902,13 @@ async fn main() -> Result<()> {
         bail!("No devices available for testing");
     }
 
-    let device_a = args.device_a.as_ref()
-        .or_else(|| devices.first().map(|d| &d.id))
-        .ok_or_else(|| anyhow::anyhow!("No device A specified or available"))?;
-
-    info!("Using device for loopback test: {}", device_a);
-
     // Create test configuration
     let config = TestConfig {
         duration: args.duration,
         size: args.size,
         delay: args.delay,
         pattern: args.pattern,
+        csv_output: args.csv,
     };
 
     // Run test
@@ -657,17 +922,42 @@ async fn main() -> Result<()> {
         let _ = tx.send(()).await;
     });
 
-    // Run test with cancellation support
-    tokio::select! {
-        result = loopback_test.run_single_device(device_a, &config) => {
-            match result {
-                Ok(_) => info!("✓ Loopback test completed successfully"),
-                Err(e) => error!("✗ Loopback test failed: {}", e),
+    // Check if both device A and B are specified for bidirectional test
+    if let (Some(device_a), Some(device_b)) = (&args.device_a, &args.device_b) {
+        info!("Running bidirectional test: {} <-> {}", device_a, device_b);
+        
+        // Run bidirectional test with cancellation support
+        tokio::select! {
+            result = loopback_test.run_bidirectional(device_a, device_b, &config) => {
+                match result {
+                    Ok(_) => info!("✓ Bidirectional loopback test completed successfully"),
+                    Err(e) => error!("✗ Bidirectional loopback test failed: {}", e),
+                }
+            }
+            _ = rx.recv() => {
+                info!("Test interrupted by user");
             }
         }
-        _ = rx.recv() => {
-            info!("Test interrupted by user");
-            loopback_test.stats.print_summary();
+    } else {
+        // Single device test
+        let device_a = args.device_a.as_ref()
+            .or_else(|| devices.first().map(|d| &d.id))
+            .ok_or_else(|| anyhow::anyhow!("No device A specified or available"))?;
+
+        info!("Using device for single loopback test: {}", device_a);
+
+        // Run single device test with cancellation support
+        tokio::select! {
+            result = loopback_test.run_single_device(device_a, &config) => {
+                match result {
+                    Ok(_) => info!("✓ Single loopback test completed successfully"),
+                    Err(e) => error!("✗ Single loopback test failed: {}", e),
+                }
+            }
+            _ = rx.recv() => {
+                info!("Test interrupted by user");
+                loopback_test.stats.print_summary();
+            }
         }
     }
 
