@@ -79,6 +79,15 @@ pub struct BridgeUsbTransport {
     is_connected: bool,
 }
 
+impl std::fmt::Debug for BridgeUsbTransport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BridgeUsbTransport")
+            .field("device_id", &self.device_id)
+            .field("is_connected", &self.is_connected)
+            .finish_non_exhaustive()
+    }
+}
+
 impl BridgeUsbTransport {
     /// Create new PL-25A1 USB transport for a device
     pub async fn new(device_info: DeviceInfo) -> Result<Self> {
