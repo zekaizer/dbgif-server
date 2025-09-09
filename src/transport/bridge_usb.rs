@@ -451,26 +451,27 @@ impl Transport for BridgeUsbTransport {
     }
 
     async fn connect(&mut self) -> Result<ConnectionStatus> {
-        if self.is_connected {
-            return Ok(ConnectionStatus::Ready);
-        }
+        // PL-25A1 Bridge Cable requires continuous monitoring regardless of initial state
+        // The cable can be connected/disconnected on either side at any time
+        // Always return Connected to ensure continuous polling is started
+        info!("PL-25A1 device {} added with continuous monitoring", self.device_id);
         
-        // Try to re-establish connection by checking device state
+        // Log initial state for debugging, but always return Connected
         match self.get_connection_state().await {
             Ok(state) => {
-                self.is_connected = !state.is_disconnected();
-                if self.is_connected {
-                    info!("PL-25A1 device {} reconnected", self.device_id);
-                    Ok(ConnectionStatus::Ready)
-                } else {
-                    Err(anyhow::anyhow!("Device is still disconnected"))
-                }
+                let (local_id, remote_id) = state.get_connector_id();
+                debug!(
+                    "PL-25A1 initial state - Local: 0x{:02x}, Remote: 0x{:02x}, Ready: {}, Disconnected: {}, Connector IDs: ({}, {})",
+                    state.local_state, state.remote_state, state.is_ready(), state.is_disconnected(), local_id, remote_id
+                );
             }
             Err(e) => {
-                self.is_connected = false;
-                Err(anyhow::anyhow!("Failed to connect PL-25A1 device: {}", e))
+                debug!("Failed to get initial PL-25A1 connection state: {}", e);
             }
         }
+        
+        // Always return Connected to trigger continuous polling
+        Ok(ConnectionStatus::Connected)
     }
 
     fn transport_type(&self) -> TransportType {
@@ -491,6 +492,31 @@ impl Transport for BridgeUsbTransport {
             self.is_connected = false;
         }
         Ok(())
+    }
+
+    /// Override get_connection_status to provide accurate PL-25A1 state
+    async fn get_connection_status(&self) -> ConnectionStatus {
+        // Check physical USB connection first
+        if !self.is_connected {
+            return ConnectionStatus::Disconnected;
+        }
+        
+        // Check PL-25A1 connection state using vendor command
+        match self.get_connection_state().await {
+            Ok(state) => {
+                if state.is_disconnected() {
+                    ConnectionStatus::Disconnected
+                } else if state.is_ready() {
+                    ConnectionStatus::Ready
+                } else {
+                    ConnectionStatus::Connected
+                }
+            }
+            Err(e) => {
+                // Connection state check failed - return error
+                ConnectionStatus::Error(format!("Failed to get connection state: {}", e))
+            }
+        }
     }
 }
 

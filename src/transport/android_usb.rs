@@ -278,14 +278,9 @@ impl Transport for AndroidUsbTransport {
     }
 
     async fn connect(&mut self) -> Result<ConnectionStatus> {
-        if self.is_connected {
-            return Ok(ConnectionStatus::Ready);
-        }
-        
-        // For Android devices, we can't easily re-establish connection
-        // The device would need to be re-enumerated
-        self.is_connected = true; // Optimistic reconnection
-        info!("Android device {} reconnected", self.device_id);
+        // Android devices are ready immediately after USB enumeration
+        // No additional handshake or logical connection establishment needed
+        info!("Android device {} is ready for ADB protocol", self.device_id);
         Ok(ConnectionStatus::Ready)
     }
 

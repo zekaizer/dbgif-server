@@ -40,16 +40,17 @@ impl TransportManager {
             .await
             .insert(device_id.clone(), transport);
 
-        // Start polling for Connected -> Ready transition
+        // Start continuous polling for transports that need logical connection
+        // Rule: Connected status = requires polling, Ready status = immediately usable
         if status == ConnectionStatus::Connected {
             info!(
-                "Added {} transport: {} (starting status polling)",
+                "Added {} transport: {} (starting continuous status polling)",
                 transport_type, device_id
             );
             self.start_status_polling(&device_id).await?;
         } else {
             info!(
-                "Added {} transport: {} (status: {})",
+                "Added {} transport: {} (status: {}, no polling needed)",
                 transport_type, device_id, status
             );
         }
@@ -203,11 +204,8 @@ impl TransportManager {
 
                 let transports_read = transports.read().await;
                 if let Some(transport) = transports_read.get(&device_id_clone) {
-                    let status = if transport.is_connected().await {
-                        ConnectionStatus::Ready
-                    } else {
-                        ConnectionStatus::Disconnected
-                    };
+                    // Use transport's get_connection_status for more accurate status
+                    let status = transport.get_connection_status().await;
 
                     // Check for status changes
                     if status != last_status {
