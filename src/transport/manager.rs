@@ -6,7 +6,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
 use super::debug::DebugTransport;
-use super::{ConnectionStatus, Transport, TransportType};
+use super::{ConnectionStatus, LoopbackTransport, Transport, TransportType};
 use crate::protocol::message::Message;
 
 /// Unified manager for all transport types
@@ -303,6 +303,98 @@ impl TransportManager {
         } else {
             Err(anyhow::anyhow!("Shutdown errors: {}", errors.join(", ")))
         }
+    }
+
+    /// Add a virtual loopback transport for testing
+    pub async fn add_loopback_transport(&self, device_id: Option<String>) -> Result<String> {
+        let id = device_id.unwrap_or_else(|| "loopback_virtual".to_string());
+        let transport = LoopbackTransport::new(id.clone());
+        
+        info!("Adding loopback transport: {}", id);
+        
+        self.add_transport_auto_debug(Box::new(transport)).await
+    }
+
+    /// Add a loopback transport with custom latency
+    pub async fn add_loopback_transport_with_latency(
+        &self, 
+        device_id: Option<String>,
+        latency: std::time::Duration,
+    ) -> Result<String> {
+        let id = device_id.unwrap_or_else(|| "loopback_virtual".to_string());
+        let transport = LoopbackTransport::with_latency(id.clone(), latency);
+        
+        info!("Adding loopback transport with {}ms latency: {}", latency.as_millis(), id);
+        
+        self.add_transport_auto_debug(Box::new(transport)).await
+    }
+
+    /// Add a loopback transport with network simulation
+    pub async fn add_loopback_transport_with_simulation(
+        &self,
+        device_id: Option<String>, 
+        latency: std::time::Duration,
+        packet_loss_rate: f32,
+    ) -> Result<String> {
+        let id = device_id.unwrap_or_else(|| "loopback_virtual".to_string());
+        let transport = LoopbackTransport::with_simulation(id.clone(), latency, packet_loss_rate);
+        
+        info!(
+            "Adding loopback transport with {}ms latency and {:.1}% packet loss: {}", 
+            latency.as_millis(), 
+            packet_loss_rate * 100.0,
+            id
+        );
+        
+        self.add_transport_auto_debug(Box::new(transport)).await
+    }
+
+    /// Add a pair of loopback transports for bidirectional testing
+    pub async fn add_loopback_pair(&self, device_a_id: Option<String>, device_b_id: Option<String>) -> Result<(String, String)> {
+        let id_a = device_a_id.unwrap_or_else(|| "loopback_a".to_string());
+        let id_b = device_b_id.unwrap_or_else(|| "loopback_b".to_string());
+        
+        let (transport_a, transport_b) = LoopbackTransport::create_pair(id_a.clone(), id_b.clone());
+        
+        info!("Adding loopback transport pair: {} <-> {}", id_a, id_b);
+        
+        // Add both transports
+        let actual_id_a = self.add_transport_auto_debug(Box::new(transport_a)).await?;
+        let actual_id_b = self.add_transport_auto_debug(Box::new(transport_b)).await?;
+        
+        info!("Loopback transport pair added successfully: {} <-> {}", actual_id_a, actual_id_b);
+        Ok((actual_id_a, actual_id_b))
+    }
+
+    /// Add a pair of loopback transports with custom latency
+    pub async fn add_loopback_pair_with_latency(
+        &self,
+        device_a_id: Option<String>,
+        device_b_id: Option<String>,
+        latency: std::time::Duration,
+    ) -> Result<(String, String)> {
+        let id_a = device_a_id.unwrap_or_else(|| "loopback_a".to_string());
+        let id_b = device_b_id.unwrap_or_else(|| "loopback_b".to_string());
+        
+        let (transport_a, transport_b) = LoopbackTransport::create_pair_with_latency(
+            id_a.clone(),
+            id_b.clone(),
+            latency,
+        );
+        
+        info!(
+            "Adding loopback transport pair with {}ms latency: {} <-> {}", 
+            latency.as_millis(),
+            id_a, 
+            id_b
+        );
+        
+        // Add both transports
+        let actual_id_a = self.add_transport_auto_debug(Box::new(transport_a)).await?;
+        let actual_id_b = self.add_transport_auto_debug(Box::new(transport_b)).await?;
+        
+        info!("Loopback transport pair added successfully: {} <-> {}", actual_id_a, actual_id_b);
+        Ok((actual_id_a, actual_id_b))
     }
 }
 

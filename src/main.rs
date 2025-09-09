@@ -1,4 +1,5 @@
 use anyhow::Result;
+use clap::Parser;
 use std::sync::Arc;
 use tokio::signal;
 use tracing::{error, info, warn};
@@ -7,18 +8,43 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use dbgif_server::server::DbgifServer;
 use dbgif_server::transport::{AndroidUsbFactory, BridgeUsbFactory, UsbMonitor};
 
+#[derive(Parser, Debug)]
+#[command(name = "dbgif-server")]
+#[command(about = "DBGIF Protocol Server")]
+struct Args {
+    /// Enable virtual loopback transport for testing
+    #[arg(long)]
+    enable_loopback: bool,
+
+    /// Server bind address
+    #[arg(long, default_value = "0.0.0.0:5037")]
+    bind: String,
+
+    /// Enable verbose logging
+    #[arg(long, short)]
+    verbose: bool,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize tracing
+    let args = Args::parse();
+
+    // Initialize tracing with optional verbose mode
+    let log_level = if args.verbose {
+        "dbgif_server=trace,debug"
+    } else {
+        "dbgif_server=debug,info"
+    };
+
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "dbgif_server=debug,info".into()),
+                .unwrap_or_else(|_| log_level.into()),
         )
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    info!("Starting dbgif server...");
+    info!("Starting dbgif server with bind address: {}", args.bind);
 
     let mut server = DbgifServer::new();
 
@@ -56,8 +82,33 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Bind to default port (5037)
-    if let Err(e) = server.bind(None).await {
+    // Add loopback transport if requested
+    if args.enable_loopback {
+        info!("Adding virtual loopback transport pair...");
+        let transport_manager = server.transport_manager();
+        match transport_manager.add_loopback_pair(None, None).await {
+            Ok((device_a, device_b)) => {
+                info!("Loopback transport pair added successfully: {} <-> {}", device_a, device_b);
+            }
+            Err(e) => {
+                warn!("Failed to add loopback transport pair: {}", e);
+            }
+        }
+    }
+
+    // Parse port from bind address (for simplicity, assume format "host:port")
+    let port = if let Some(port_str) = args.bind.split(':').last() {
+        port_str.parse::<u16>()
+            .unwrap_or_else(|_| {
+                warn!("Invalid port in bind address '{}', using default port", args.bind);
+                5037
+            })
+    } else {
+        5037
+    };
+
+    // Bind to specified port
+    if let Err(e) = server.bind(Some(port)).await {
         error!("Failed to bind server: {}", e);
         return Err(e);
     }

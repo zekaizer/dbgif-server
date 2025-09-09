@@ -60,6 +60,7 @@ impl HostService {
                     TransportType::Tcp => "tcp",
                     TransportType::AndroidUsb => "usb",
                     TransportType::BridgeUsb => "bridge_usb",
+                    TransportType::Loopback => "loopback",
                 };
                 output.push_str(&format!("{}\t{}\t{}\n", device_id, status, transport_info));
             } else {

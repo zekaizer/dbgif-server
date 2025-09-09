@@ -9,6 +9,7 @@ pub enum TransportType {
     Tcp,
     AndroidUsb,
     BridgeUsb,
+    Loopback,
 }
 
 impl fmt::Display for TransportType {
@@ -17,6 +18,7 @@ impl fmt::Display for TransportType {
             TransportType::Tcp => write!(f, "TCP"),
             TransportType::AndroidUsb => write!(f, "Android USB"),
             TransportType::BridgeUsb => write!(f, "Bridge USB"),
+            TransportType::Loopback => write!(f, "Loopback"),
         }
     }
 }
@@ -106,6 +108,7 @@ pub trait Transport: Send + Sync {
 pub mod android_usb;
 pub mod bridge_usb;
 pub mod debug;
+pub mod loopback;
 pub mod manager;
 pub mod tcp;
 pub mod usb_common;
@@ -114,6 +117,7 @@ pub mod usb_monitor;
 pub use android_usb::*;
 pub use bridge_usb::*;
 pub use debug::{is_debug_env_enabled, DebugTransport};
+pub use loopback::*;
 pub use manager::*;
 pub use tcp::*;
 pub use usb_common::*;
