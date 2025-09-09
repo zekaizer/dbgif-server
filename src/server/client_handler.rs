@@ -5,7 +5,7 @@ use std::io;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use crate::protocol::host_commands::HostCommand;
 use crate::protocol::stream::StreamManager;
@@ -20,11 +20,9 @@ pub enum ClientState {
     Connected,
 }
 
-/// Stream mapping between client-server and server-device
+/// Simple stream ID mapping for 1:1 client-device connection
 #[derive(Debug, Clone)]
 struct StreamMapping {
-    client_local_id: u32,
-    client_remote_id: u32,
     device_local_id: u32,
     device_remote_id: u32,
 }
@@ -37,7 +35,7 @@ pub struct ClientHandler {
     host_service: HostService,
     target_device_id: Option<String>,
     transport_manager: Arc<TransportManager>,
-    /// Maps client local_id to device stream information
+    /// Maps client local_id to device stream IDs (1:1 mapping)
     stream_mappings: HashMap<u32, StreamMapping>,
     /// Counter for generating device-side local_ids
     device_stream_counter: u32,
@@ -93,6 +91,15 @@ impl ClientHandler {
 
         self.state = ClientState::Disconnected;
         self.stream_manager.close_all_streams();
+
+        // Release device ownership if client had a device
+        if let Some(device_id) = &self.target_device_id {
+            if let Err(e) = self.transport_manager.release_device(device_id, self.client_id).await {
+                error!("Failed to release device {} for client {}: {}", device_id, self.client_id, e);
+            } else {
+                info!("Released device {} ownership for client {}", device_id, self.client_id);
+            }
+        }
 
         // Disconnect client stream
         if let Err(e) = self.stream.shutdown().await {
@@ -179,8 +186,8 @@ impl ClientHandler {
             // Convert device stream IDs back to client stream IDs
             let client_message = Message::new(
                 device_message.command,
-                mapping.client_local_id,
-                mapping.client_remote_id,
+                client_local_id,
+                mapping.device_remote_id,
                 device_message.data,
             );
 
@@ -315,6 +322,24 @@ impl ClientHandler {
                         self.send_message(close_msg).await?;
                     }
                     HostServiceResponse::TransportSelected(device_id) => {
+                        // Check if device is already occupied by another client
+                        if self.transport_manager.is_device_occupied(&device_id).await {
+                            warn!("Device {} already occupied by another client", device_id);
+                            let error_data = format!("FAIL{:04x}Device busy", 11);
+                            let fail_msg = Message::new(Command::Write, local_id, remote_id, Bytes::from(error_data));
+                            self.send_message(fail_msg).await?;
+                            return Ok(());
+                        }
+
+                        // Acquire exclusive access to device
+                        if let Err(e) = self.transport_manager.acquire_device(&device_id, self.client_id).await {
+                            error!("Failed to acquire device {}: {}", device_id, e);
+                            let error_data = format!("FAIL{:04x}Cannot acquire device", 22);
+                            let fail_msg = Message::new(Command::Write, local_id, remote_id, Bytes::from(error_data));
+                            self.send_message(fail_msg).await?;
+                            return Ok(());
+                        }
+
                         // Set target device for subsequent commands
                         self.target_device_id = Some(device_id);
 
@@ -431,8 +456,6 @@ impl ClientHandler {
             self.device_stream_counter += 1;
             
             let mapping = StreamMapping {
-                client_local_id,
-                client_remote_id: arg0,
                 device_local_id,
                 device_remote_id: 0, // Will be set when device responds
             };

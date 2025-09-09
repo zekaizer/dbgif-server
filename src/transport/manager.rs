@@ -9,11 +9,20 @@ use super::debug::DebugTransport;
 use super::{ConnectionStatus, LoopbackTransport, Transport, TransportType};
 use crate::protocol::message::Message;
 
+/// Device ownership information
+#[derive(Debug, Clone)]
+struct DeviceOccupancy {
+    client_id: u32,
+    acquired_at: std::time::Instant,
+}
+
 /// Unified manager for all transport types
 pub struct TransportManager {
     transports: Arc<RwLock<HashMap<String, Box<dyn Transport + Send>>>>,
     monitors: RwLock<HashMap<String, watch::Receiver<ConnectionStatus>>>,
     monitor_tasks: RwLock<HashMap<String, JoinHandle<()>>>,
+    /// Track which client owns which device (exclusive access)
+    device_occupancy: Arc<RwLock<HashMap<String, DeviceOccupancy>>>,
 }
 
 impl TransportManager {
@@ -23,6 +32,7 @@ impl TransportManager {
             transports: Arc::new(RwLock::new(HashMap::new())),
             monitors: RwLock::new(HashMap::new()),
             monitor_tasks: RwLock::new(HashMap::new()),
+            device_occupancy: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -395,6 +405,85 @@ impl TransportManager {
         
         info!("Loopback transport pair added successfully: {} <-> {}", actual_id_a, actual_id_b);
         Ok((actual_id_a, actual_id_b))
+    }
+
+    /// Device Ownership Management
+
+    /// Check if a device is currently occupied by any client
+    pub async fn is_device_occupied(&self, device_id: &str) -> bool {
+        let occupancy = self.device_occupancy.read().await;
+        occupancy.contains_key(device_id)
+    }
+
+    /// Acquire exclusive access to a device for a client
+    pub async fn acquire_device(&self, device_id: &str, client_id: u32) -> Result<()> {
+        let mut occupancy = self.device_occupancy.write().await;
+
+        // Check if device is already occupied
+        if let Some(existing) = occupancy.get(device_id) {
+            if existing.client_id != client_id {
+                return Err(anyhow::anyhow!(
+                    "Device {} already occupied by client {}",
+                    device_id,
+                    existing.client_id
+                ));
+            }
+            // Same client re-acquiring is OK
+            return Ok(());
+        }
+
+        // Acquire the device
+        let ownership = DeviceOccupancy {
+            client_id,
+            acquired_at: std::time::Instant::now(),
+        };
+        occupancy.insert(device_id.to_string(), ownership);
+
+        info!("Client {} acquired exclusive access to device {}", client_id, device_id);
+        Ok(())
+    }
+
+    /// Release device ownership for a client
+    pub async fn release_device(&self, device_id: &str, client_id: u32) -> Result<()> {
+        let mut occupancy = self.device_occupancy.write().await;
+
+        if let Some(existing) = occupancy.get(device_id) {
+            if existing.client_id != client_id {
+                return Err(anyhow::anyhow!(
+                    "Cannot release device {}: owned by client {}, not {}",
+                    device_id,
+                    existing.client_id,
+                    client_id
+                ));
+            }
+            occupancy.remove(device_id);
+            info!("Client {} released device {}", client_id, device_id);
+        }
+        
+        Ok(())
+    }
+
+    /// Get current device ownership status
+    pub async fn get_device_owner(&self, device_id: &str) -> Option<u32> {
+        let occupancy = self.device_occupancy.read().await;
+        occupancy.get(device_id).map(|o| o.client_id)
+    }
+
+    /// Force release all devices owned by a specific client (cleanup on client disconnect)
+    pub async fn release_all_devices_for_client(&self, client_id: u32) -> Result<()> {
+        let mut occupancy = self.device_occupancy.write().await;
+        let devices_to_release: Vec<String> = occupancy
+            .iter()
+            .filter(|(_, ownership)| ownership.client_id == client_id)
+            .map(|(device_id, _)| device_id.clone())
+            .collect();
+
+        for device_id in devices_to_release {
+            occupancy.remove(&device_id);
+            info!("Force released device {} from client {}", device_id, client_id);
+        }
+
+        Ok(())
     }
 }
 
