@@ -45,7 +45,7 @@ pub trait Transport: Send + Sync {
     async fn send_message(&mut self, message: &Message) -> Result<()>;
     async fn receive_message(&mut self) -> Result<Message>;
 
-    async fn connect(&mut self) -> Result<()>;
+    async fn connect(&mut self) -> Result<ConnectionStatus>;
     async fn disconnect(&mut self) -> Result<()>;
     async fn is_connected(&self) -> bool;
 

@@ -450,9 +450,9 @@ impl Transport for BridgeUsbTransport {
         &self.device_id
     }
 
-    async fn connect(&mut self) -> Result<()> {
+    async fn connect(&mut self) -> Result<ConnectionStatus> {
         if self.is_connected {
-            return Ok(());
+            return Ok(ConnectionStatus::Ready);
         }
         
         // Try to re-establish connection by checking device state
@@ -461,7 +461,7 @@ impl Transport for BridgeUsbTransport {
                 self.is_connected = !state.is_disconnected();
                 if self.is_connected {
                     info!("PL-25A1 device {} reconnected", self.device_id);
-                    Ok(())
+                    Ok(ConnectionStatus::Ready)
                 } else {
                     Err(anyhow::anyhow!("Device is still disconnected"))
                 }

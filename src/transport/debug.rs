@@ -2,7 +2,7 @@ use anyhow::Result;
 /// Simplified debug implementation with better feature flag support
 use async_trait::async_trait;
 
-use super::{Transport, TransportType};
+use super::{ConnectionStatus, Transport, TransportType};
 use crate::protocol::Message;
 
 #[cfg(feature = "transport-debug")]
@@ -146,7 +146,7 @@ mod debug_enabled {
         }
 
         #[inline]
-        async fn connect(&mut self) -> Result<()> {
+        async fn connect(&mut self) -> Result<ConnectionStatus> {
             if self.is_debug_enabled() {
                 debug!("CONN [{}] Attempting to connect...", self.device_id);
             }
@@ -155,7 +155,7 @@ mod debug_enabled {
 
             if self.is_debug_enabled() {
                 match &result {
-                    Ok(_) => info!("CONN [{}] Connected successfully", self.device_id),
+                    Ok(status) => info!("CONN [{}] Connected successfully with status: {}", self.device_id, status),
                     Err(e) => debug!("CONN [{}] Connection failed: {}", self.device_id, e),
                 }
             }
@@ -261,7 +261,7 @@ mod debug_disabled {
         }
 
         #[inline(always)]
-        async fn connect(&mut self) -> Result<()> {
+        async fn connect(&mut self) -> Result<ConnectionStatus> {
             self.inner.connect().await
         }
 

@@ -31,15 +31,8 @@ impl TransportManager {
         let device_id = transport.device_id().to_string();
         let transport_type = transport.transport_type();
 
-        // Initialize connection
-        transport.connect().await?;
-
-        // Check current connection status to determine if polling is needed
-        let status = if transport.is_connected().await {
-            ConnectionStatus::Ready
-        } else {
-            ConnectionStatus::Disconnected
-        };
+        // Initialize connection and initial connection status
+        let status = transport.connect().await?;
 
         // Add transport to collection
         self.transports

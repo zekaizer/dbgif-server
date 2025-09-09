@@ -6,7 +6,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tracing::{debug, error};
 
-use super::{Transport, TransportType};
+use super::{ConnectionStatus, Transport, TransportType};
 use crate::protocol::message::Message;
 
 pub struct TcpTransport {
@@ -119,10 +119,10 @@ impl Transport for TcpTransport {
         }
     }
 
-    async fn connect(&mut self) -> Result<()> {
+    async fn connect(&mut self) -> Result<ConnectionStatus> {
         if self.stream.is_some() {
             self.is_connected = true;
-            Ok(())
+            Ok(ConnectionStatus::Ready)
         } else {
             Err(anyhow::anyhow!(
                 "Cannot reconnect TCP transport - no stream available"
