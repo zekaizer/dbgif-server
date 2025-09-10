@@ -350,6 +350,83 @@ impl LoopbackTestApp {
         Ok(devices)
     }
 
+    /// Basic connectivity test - send once from A, try to receive on B
+    async fn run_basic_connectivity_test(&mut self) -> Result<()> {
+        info!("=== Running Basic Connectivity Test ===");
+        
+        // Step 1: Verify connection states
+        info!("Step 1: Checking connection states...");
+        
+        let state_a = self.side_a.transport.lock().await
+            .get_connection_state().await?;
+        let state_b = self.side_b.transport.lock().await
+            .get_connection_state().await?;
+        
+        info!("Side A state: Local=0x{:02x}, Remote=0x{:02x}, Ready={}", 
+              state_a.local_state, state_a.remote_state, state_a.is_ready());
+        info!("Side B state: Local=0x{:02x}, Remote=0x{:02x}, Ready={}", 
+              state_b.local_state, state_b.remote_state, state_b.is_ready());
+        
+        if !state_a.is_ready() || !state_b.is_ready() {
+            bail!("Devices not ready for communication");
+        }
+        
+        // Step 2: Simple data transfer A → B
+        info!("Step 2: Testing data transfer from A to B...");
+        
+        let test_data = vec![0xDE, 0xAD, 0xBE, 0xEF]; // 4 bytes test pattern
+        info!("Sending {} bytes from Side A: {:02x?}", test_data.len(), test_data);
+        
+        // Send from A
+        {
+            let mut transport_a = self.side_a.transport.lock().await;
+            let msg = Message::new(Command::Write, 0, 0, test_data.clone());
+            transport_a.send_message(&msg).await
+                .context("Failed to send from Side A")?;
+            info!("✓ Side A: Data sent successfully");
+        }
+        
+        // Try to receive on B with shorter timeout
+        info!("Waiting for data on Side B (timeout: 2s)...");
+        {
+            let mut transport_b = self.side_b.transport.lock().await;
+            match timeout(Duration::from_secs(2), transport_b.receive_message()).await {
+                Ok(Ok(received_msg)) => {
+                    info!("✓ Side B: Received {} bytes: {:02x?}", 
+                          received_msg.data.len(), &received_msg.data[..]);
+                    
+                    if received_msg.data == test_data {
+                        info!("✓✓✓ DATA MATCH! Basic connectivity test PASSED!");
+                        return Ok(());
+                    } else {
+                        warn!("✗ Data mismatch!");
+                        warn!("  Expected: {:02x?}", test_data);
+                        warn!("  Received: {:02x?}", received_msg.data);
+                    }
+                }
+                Ok(Err(e)) => {
+                    warn!("✗ Side B receive error: {}", e);
+                }
+                Err(_) => {
+                    warn!("✗ Side B receive timeout - no data received");
+                }
+            }
+        }
+        
+        // Step 3: Alternative test - check if data is stuck in buffer
+        info!("Step 3: Checking if PL-25A1 requires special bridge protocol...");
+        
+        // Try vendor command to check buffer status
+        {
+            let transport_b = self.side_b.transport.lock().await;
+            if let Ok(status) = transport_b.query_feature_status().await {
+                info!("Side B feature status: [{:02x}, {:02x}]", status[0], status[1]);
+            }
+        }
+        
+        bail!("Basic connectivity test FAILED - PL-25A1 may require special bridge protocol");
+    }
+
     /// Run the complete loopback test
     pub async fn run_test(&mut self) -> Result<()> {
         info!("Starting PL-25A1 Loopback Test...");
@@ -360,7 +437,21 @@ impl LoopbackTestApp {
             self.side_b.wait_for_ready()
         )?;
         
-        info!("✓ Both devices ready - starting raw data transfer tests");
+        info!("✓ Both devices ready");
+        
+        // Basic connectivity test first
+        match self.run_basic_connectivity_test().await {
+            Ok(_) => {
+                info!("✓ Basic connectivity test passed, proceeding with main tests");
+            }
+            Err(e) => {
+                error!("Basic connectivity test failed: {}", e);
+                error!("Cannot proceed with main tests");
+                return Err(e);
+            }
+        }
+        
+        info!("Starting main performance tests...");
 
         // Start statistics reporting task
         let stats_clone = Arc::clone(&self.stats);
