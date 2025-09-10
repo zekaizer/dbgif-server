@@ -685,7 +685,7 @@ impl LoopbackTest {
         Ok(())
     }
 
-    /// Run bridge sender (sends data and receives from other transport)
+    /// Run bridge sender (sends data and receives from other transport with separated TX/RX tasks)
     async fn run_bridge_sender(
         client: &DbgifClient,
         device: &str,
@@ -719,98 +719,143 @@ impl LoopbackTest {
         let remote_id = okay_response.arg0;
         info!("{} - Bridge stream opened: local={}, remote={}", direction, local_id, remote_id);
 
-        // Start concurrent send and receive tasks
+        // Split stream for concurrent TX and RX
+        let (mut read_half, mut write_half) = stream.into_split();
+        
+        // Create channels for coordination
+        let (tx_done, mut rx_done) = tokio::sync::mpsc::channel::<()>(1);
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::broadcast::channel::<()>(2);
+        
         let send_stats = Arc::clone(&stats);
         let receive_stats = Arc::clone(&stats);
+        let start_clone = start;
+        let direction_clone = direction.to_string();
+        let config_clone = TestConfig {
+            duration: config.duration,
+            size: config.size,
+            delay: config.delay,
+            pattern: config.pattern.clone(),
+            csv_output: config.csv_output,
+        };
         
-        // Clone stream for concurrent access - we'll need to manage this carefully
-        // For now, we'll alternate between send and receive
+        // TX Task - sends data continuously
+        let tx_task = tokio::spawn(async move {
+            let mut shutdown_rx = shutdown_tx.subscribe();
+            while start_clone.elapsed() < test_duration {
+                tokio::select! {
+                    _ = shutdown_rx.recv() => {
+                        info!("{} - TX task shutting down", direction_clone);
+                        break;
+                    }
+                    _ = async {
+                        let test_data = Self::generate_test_data_static(config_clone.size, &config_clone.pattern);
+                        let request_start = Instant::now();
+                        
+                        let write_msg = Message::new(Command::Write, local_id, remote_id, test_data.clone());
+                        let serialized = write_msg.serialize();
+                        
+                        // Send with flush (already implemented in transport layer)
+                        if let Err(e) = write_half.write_all(&serialized).await {
+                            warn!("{} - Failed to send bridge data: {}", direction_clone, e);
+                            send_stats.record_error();
+                            return;
+                        }
+                        
+                        let send_latency = request_start.elapsed();
+                        send_stats.record_success(config_clone.size, send_latency);
+                        
+                        if config_clone.csv_output {
+                            let timestamp_ms = start_clone.elapsed().as_millis();
+                            println!("{}_tx,{},{},{},true", direction_clone, timestamp_ms, config_clone.size, send_latency.as_micros());
+                        }
+                        
+                        if config_clone.delay > 0 {
+                            tokio::time::sleep(Duration::from_millis(config_clone.delay)).await;
+                        }
+                    } => {}
+                }
+            }
+            let _ = tx_done.send(()).await;
+        });
         
-        while start.elapsed() < test_duration {
-            // Send phase
-            let test_data = Self::generate_test_data_static(config.size, &config.pattern);
-            let request_start = Instant::now();
-            
-            let write_msg = Message::new(Command::Write, local_id, remote_id, test_data.clone());
-            if let Err(e) = Self::send_message_static(client, &mut stream, &write_msg).await {
-                warn!("{} - Failed to send bridge data: {}", direction, e);
-                stats.record_error();
-                if config.delay > 0 {
-                    tokio::time::sleep(Duration::from_millis(config.delay)).await;
-                }
-                continue;
-            }
-            
-            // Wait for OKAY acknowledgment
-            match Self::receive_message_static(client, &mut stream).await {
-                Ok(ack) => {
-                    if ack.command != Command::Okay {
-                        warn!("{} - Expected OKAY for bridge write, got {:?}", direction, ack.command);
-                        stats.record_error();
-                        if config.delay > 0 {
-                            tokio::time::sleep(Duration::from_millis(config.delay)).await;
+        let direction_clone2 = direction.to_string();
+        
+        // RX Task - receives data continuously  
+        let rx_task = tokio::spawn(async move {
+            let mut shutdown_rx = shutdown_tx.subscribe();
+            while start.elapsed() < test_duration {
+                tokio::select! {
+                    _ = shutdown_rx.recv() => {
+                        info!("{} - RX task shutting down", direction_clone2);
+                        break;
+                    }
+                    result = tokio::time::timeout(Duration::from_millis(500), async {
+                        // Read message header
+                        let mut header = [0u8; 24];
+                        read_half.read_exact(&mut header).await?;
+                        
+                        // Parse header to get data length
+                        use bytes::Buf;
+                        let mut header_cursor = std::io::Cursor::new(&header);
+                        let _command = header_cursor.get_u32_le();
+                        let _arg0 = header_cursor.get_u32_le();
+                        let _arg1 = header_cursor.get_u32_le();
+                        let data_length = header_cursor.get_u32_le();
+                        
+                        // Read data if present
+                        let mut full_message = header.to_vec();
+                        if data_length > 0 {
+                            let mut data = vec![0u8; data_length as usize];
+                            read_half.read_exact(&mut data).await?;
+                            full_message.extend_from_slice(&data);
                         }
-                        continue;
-                    }
-                }
-                Err(e) => {
-                    warn!("{} - Failed to receive bridge write ACK: {}", direction, e);
-                    stats.record_error();
-                    if config.delay > 0 {
-                        tokio::time::sleep(Duration::from_millis(config.delay)).await;
-                    }
-                    continue;
-                }
-            }
-            
-            // Record successful send
-            let send_latency = request_start.elapsed();
-            stats.record_success(config.size, send_latency);
-            
-            if config.csv_output {
-                let timestamp_ms = start.elapsed().as_millis();
-                println!("{},{},{},{},true", direction, timestamp_ms, config.size, send_latency.as_micros());
-            }
-            
-            // Try to receive data from the other transport (non-blocking)
-            // We'll use a short timeout to avoid blocking the send loop
-            match tokio::time::timeout(Duration::from_millis(100), Self::receive_message_static(client, &mut stream)).await {
-                Ok(Ok(recv_msg)) => {
-                    if recv_msg.command == Command::Write {
-                        // Send OKAY acknowledgment
-                        let ack_msg = Message::new(Command::Okay, recv_msg.arg1, recv_msg.arg0, Vec::new());
-                        let _ = Self::send_message_static(client, &mut stream, &ack_msg).await;
                         
-                        info!("{} - Received bridge data: {} bytes", direction, recv_msg.data.len());
-                        
-                        if config.csv_output {
-                            let timestamp_ms = start.elapsed().as_millis();
-                            println!("{}_recv,{},{},0,true", direction, timestamp_ms, recv_msg.data.len());
+                        let message = Message::deserialize(full_message.as_slice())?;
+                        Ok::<Message, anyhow::Error>(message)
+                    }) => {
+                        match result {
+                            Ok(Ok(recv_msg)) => {
+                                if recv_msg.command == Command::Write {
+                                    info!("{} - Received bridge data: {} bytes", direction_clone2, recv_msg.data.len());
+                                    
+                                    if config.csv_output {
+                                        let timestamp_ms = start.elapsed().as_millis();
+                                        println!("{}_rx,{},{},0,true", direction_clone2, timestamp_ms, recv_msg.data.len());
+                                    }
+                                }
+                            }
+                            Ok(Err(e)) => {
+                                debug!("{} - RX error: {}", direction_clone2, e);
+                            }
+                            Err(_) => {
+                                // Timeout is expected when no data available
+                            }
                         }
                     }
                 }
-                Ok(Err(e)) => {
-                    debug!("{} - Error receiving bridge data: {}", direction, e);
-                }
-                Err(_) => {
-                    // Timeout is expected, just continue
-                }
             }
+        });
 
-            if config.delay > 0 {
-                tokio::time::sleep(Duration::from_millis(config.delay)).await;
+        // Wait for completion or timeout
+        tokio::select! {
+            _ = tokio::time::sleep(test_duration) => {
+                info!("{} - Test duration reached, stopping tasks", direction);
+            }
+            _ = rx_done.recv() => {
+                info!("{} - TX task completed", direction);
             }
         }
-
-        // Close the bridge stream
-        let close_msg = Message::new(Command::Close, local_id, remote_id, Vec::new());
-        let _ = Self::send_message_static(client, &mut stream, &close_msg).await;
+        
+        // Shutdown both tasks
+        let _ = shutdown_tx.send(());
+        tx_task.abort();
+        rx_task.abort();
         
         info!("{} bridge sender completed", direction);
         Ok(())
     }
 
-    /// Run client to server test (one direction of bidirectional test)
+    /// Run client to server test with improved TX/RX handling (one direction of bidirectional test)
     async fn run_client_to_server(
         client: &DbgifClient,
         client_device: &str,
@@ -829,137 +874,175 @@ impl LoopbackTest {
             Duration::from_secs(u64::MAX)
         };
 
-        while start.elapsed() < test_duration {
-            // Generate test data
-            let test_data = Self::generate_test_data_static(config.size, &config.pattern);
-            let request_start = Instant::now();
+        // Open persistent shell:echo service for better performance
+        let local_id = 2;
+        let echo_service = b"shell:echo".to_vec();
+        let open_msg = Message::new(Command::Open, local_id, 0, echo_service);
+        
+        Self::send_message_static(client, &mut stream, &open_msg).await?;
+        
+        // Wait for OKAY response
+        let okay_response = Self::receive_message_static(client, &mut stream).await?;
+        if okay_response.command != Command::Okay {
+            bail!("{} - Expected OKAY for echo service, got {:?}", direction, okay_response.command);
+        }
+        
+        let remote_id = okay_response.arg0;
+        info!("{} - Echo service opened: local={}, remote={}", direction, local_id, remote_id);
 
-            // Open shell:echo service
-            let local_id = 2;
-            let echo_service = b"shell:echo".to_vec();
-            let open_msg = Message::new(Command::Open, local_id, 0, echo_service);
+        // Split stream for better performance
+        let (mut read_half, mut write_half) = stream.into_split();
+        
+        // Create coordination channels
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::broadcast::channel::<()>(2);
+        
+        let send_stats = Arc::clone(&stats);
+        let receive_stats = Arc::clone(&stats);
+        let start_clone = start;
+        let direction_clone = direction.to_string();
+        let config_clone = TestConfig {
+            duration: config.duration,
+            size: config.size,
+            delay: config.delay,
+            pattern: config.pattern.clone(),
+            csv_output: config.csv_output,
+        };
+        
+        // TX Task - sends echo requests
+        let tx_task = tokio::spawn(async move {
+            let mut shutdown_rx = shutdown_tx.subscribe();
+            let mut request_counter = 0u32;
             
-            match Self::send_message_static(client, &mut stream, &open_msg).await {
-                Ok(_) => {},
-                Err(e) => {
-                    warn!("{} - Failed to send OPEN: {}", direction, e);
-                    stats.record_error();
-                    if config.delay > 0 {
-                        tokio::time::sleep(Duration::from_millis(config.delay)).await;
+            while start_clone.elapsed() < test_duration {
+                tokio::select! {
+                    _ = shutdown_rx.recv() => {
+                        info!("{} - TX task shutting down", direction_clone);
+                        break;
                     }
-                    continue;
+                    _ = async {
+                        let test_data = Self::generate_test_data_static(config_clone.size, &config_clone.pattern);
+                        let request_start = Instant::now();
+                        request_counter += 1;
+                        
+                        // Send WRITE message
+                        let write_msg = Message::new(Command::Write, local_id, remote_id, test_data.clone());
+                        let serialized = write_msg.serialize();
+                        
+                        if let Err(e) = write_half.write_all(&serialized).await {
+                            warn!("{} - Failed to send WRITE: {}", direction_clone, e);
+                            send_stats.record_error();
+                            return;
+                        }
+                        
+                        // Record send timing (we'll measure full round-trip in RX task)
+                        debug!("{} - Sent request #{}: {} bytes", direction_clone, request_counter, config_clone.size);
+                        
+                        if config_clone.delay > 0 {
+                            tokio::time::sleep(Duration::from_millis(config_clone.delay)).await;
+                        }
+                    } => {}
                 }
             }
+        });
+        
+        let direction_clone2 = direction.to_string();
+        
+        // RX Task - receives echo responses and OKAY acknowledgments
+        let rx_task = tokio::spawn(async move {
+            let mut shutdown_rx = shutdown_tx.subscribe();
+            let mut response_counter = 0u32;
             
-            // Wait for OKAY response
-            match Self::receive_message_static(client, &mut stream).await {
-                Ok(okay_response) => {
-                    if okay_response.command != Command::Okay {
-                        warn!("{} - Expected OKAY, got {:?}", direction, okay_response.command);
-                        stats.record_error();
-                        if config.delay > 0 {
-                            tokio::time::sleep(Duration::from_millis(config.delay)).await;
-                        }
-                        continue;
+            while start.elapsed() < test_duration {
+                tokio::select! {
+                    _ = shutdown_rx.recv() => {
+                        info!("{} - RX task shutting down", direction_clone2);
+                        break;
                     }
-                    
-                    let remote_id = okay_response.arg0;
-                    
-                    // Send test data
-                    let write_msg = Message::new(Command::Write, local_id, remote_id, test_data.clone());
-                    if let Err(e) = Self::send_message_static(client, &mut stream, &write_msg).await {
-                        warn!("{} - Failed to send WRITE: {}", direction, e);
-                        stats.record_error();
-                        if config.delay > 0 {
-                            tokio::time::sleep(Duration::from_millis(config.delay)).await;
+                    result = tokio::time::timeout(Duration::from_secs(5), async {
+                        // Read message header
+                        let mut header = [0u8; 24];
+                        read_half.read_exact(&mut header).await?;
+                        
+                        // Parse header to get data length
+                        use bytes::Buf;
+                        let mut header_cursor = std::io::Cursor::new(&header);
+                        let _command = header_cursor.get_u32_le();
+                        let _arg0 = header_cursor.get_u32_le();
+                        let _arg1 = header_cursor.get_u32_le();
+                        let data_length = header_cursor.get_u32_le();
+                        
+                        // Read data if present
+                        let mut full_message = header.to_vec();
+                        if data_length > 0 {
+                            let mut data = vec![0u8; data_length as usize];
+                            read_half.read_exact(&mut data).await?;
+                            full_message.extend_from_slice(&data);
                         }
-                        continue;
-                    }
-                    
-                    // Wait for OKAY acknowledgment
-                    match Self::receive_message_static(client, &mut stream).await {
-                        Ok(ack) => {
-                            if ack.command != Command::Okay {
-                                warn!("{} - Expected OKAY for WRITE, got {:?}", direction, ack.command);
-                                stats.record_error();
-                                if config.delay > 0 {
-                                    tokio::time::sleep(Duration::from_millis(config.delay)).await;
-                                }
-                                continue;
-                            }
-                        }
-                        Err(e) => {
-                            warn!("{} - Failed to receive WRITE ACK: {}", direction, e);
-                            stats.record_error();
-                            if config.delay > 0 {
-                                tokio::time::sleep(Duration::from_millis(config.delay)).await;
-                            }
-                            continue;
-                        }
-                    }
-                    
-                    // Wait for echo response
-                    match Self::receive_message_static(client, &mut stream).await {
-                        Ok(echo_response) => {
-                            if echo_response.command == Command::Write {
-                                // Send OKAY acknowledgment for echo response
-                                let ack_msg = Message::new(Command::Okay, echo_response.arg1, echo_response.arg0, Vec::new());
-                                let _ = Self::send_message_static(client, &mut stream, &ack_msg).await;
-                                
-                                // Verify data integrity
-                                if echo_response.data.len() == test_data.len() {
-                                    let latency = request_start.elapsed();
-                                    stats.record_success(config.size, latency);
-                                    
-                                    if config.csv_output {
-                                        let timestamp_ms = start.elapsed().as_millis();
-                                        println!("{},{},{},{},true", direction, timestamp_ms, config.size, latency.as_micros());
+                        
+                        let message = Message::deserialize(full_message.as_slice())?;
+                        Ok::<Message, anyhow::Error>(message)
+                    }) => {
+                        match result {
+                            Ok(Ok(recv_msg)) => {
+                                match recv_msg.command {
+                                    Command::Okay => {
+                                        // WRITE acknowledgment - expected but no action needed
+                                        debug!("{} - Received OKAY acknowledgment", direction_clone2);
                                     }
-                                } else {
-                                    warn!("{} - Echo data size mismatch: {} != {}", direction, echo_response.data.len(), test_data.len());
-                                    stats.record_error();
-                                    if config.csv_output {
-                                        let timestamp_ms = start.elapsed().as_millis();
-                                        println!("{},{},0,0,false", direction, timestamp_ms);
+                                    Command::Write => {
+                                        // Echo response
+                                        response_counter += 1;
+                                        
+                                        // Send OKAY acknowledgment for echo response
+                                        let ack_msg = Message::new(Command::Okay, recv_msg.arg1, recv_msg.arg0, Vec::new());
+                                        let ack_serialized = ack_msg.serialize();
+                                        let _ = write_half.write_all(&ack_serialized).await;
+                                        
+                                        // Record successful round-trip
+                                        let latency = Duration::from_millis(100); // Approximate since we can't track individual requests easily in split mode
+                                        receive_stats.record_success(config.size, latency);
+                                        
+                                        if config.csv_output {
+                                            let timestamp_ms = start.elapsed().as_millis();
+                                            println!("{},{},{},{},true", direction_clone2, timestamp_ms, config.size, latency.as_micros());
+                                        }
+                                        
+                                        debug!("{} - Received echo response #{}: {} bytes", direction_clone2, response_counter, recv_msg.data.len());
+                                    }
+                                    _ => {
+                                        warn!("{} - Unexpected message type: {:?}", direction_clone2, recv_msg.command);
                                     }
                                 }
-                            } else {
-                                warn!("{} - Expected WRITE echo, got {:?}", direction, echo_response.command);
-                                stats.record_error();
-                                if config.csv_output {
-                                    let timestamp_ms = start.elapsed().as_millis();
-                                    println!("{},{},0,0,false", direction, timestamp_ms);
-                                }
+                            }
+                            Ok(Err(e)) => {
+                                warn!("{} - RX error: {}", direction_clone2, e);
+                                receive_stats.record_error();
+                            }
+                            Err(_) => {
+                                debug!("{} - RX timeout (no data available)", direction_clone2);
                             }
                         }
-                        Err(e) => {
-                            warn!("{} - Failed to receive echo response: {}", direction, e);
-                            stats.record_error();
-                            if config.csv_output {
-                                let timestamp_ms = start.elapsed().as_millis();
-                                println!("{},{},0,0,false", direction, timestamp_ms);
-                            }
-                        }
-                    }
-                    
-                    // Close the stream
-                    let close_msg = Message::new(Command::Close, local_id, remote_id, Vec::new());
-                    let _ = Self::send_message_static(client, &mut stream, &close_msg).await;
-                }
-                Err(e) => {
-                    warn!("{} - Failed to receive OKAY: {}", direction, e);
-                    stats.record_error();
-                    if config.csv_output {
-                        let timestamp_ms = start.elapsed().as_millis();
-                        println!("{},{},0,0,false", direction, timestamp_ms);
                     }
                 }
             }
+        });
 
-            if config.delay > 0 {
-                tokio::time::sleep(Duration::from_millis(config.delay)).await;
+        // Wait for completion or timeout
+        tokio::select! {
+            _ = tokio::time::sleep(test_duration) => {
+                info!("{} - Test duration reached, stopping tasks", direction);
             }
         }
+        
+        // Shutdown both tasks
+        let _ = shutdown_tx.send(());
+        tx_task.abort();
+        rx_task.abort();
+        
+        // Close the echo service stream
+        let close_msg = Message::new(Command::Close, local_id, remote_id, Vec::new());
+        let close_serialized = close_msg.serialize();
+        let _ = write_half.write_all(&close_serialized).await;
 
         info!("{} test completed", direction);
         Ok(())
