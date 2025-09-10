@@ -457,6 +457,132 @@ impl LoopbackTestApp {
         bail!("Basic connectivity test FAILED - PL-25A1 may require special bridge protocol");
     }
 
+    /// Simple one-way transfer test (A sends, B receives continuously)
+    async fn run_simple_oneway_test(&mut self) -> Result<()> {
+        info!("=== Running Simple One-Way Transfer Test ===");
+        info!("Side A will send continuously, Side B will receive continuously");
+        
+        let test_duration = Duration::from_secs(10); // Fixed 10 second test
+        let test_data = vec![0x55; self.args.size]; // Fixed pattern
+        let start_time = Instant::now();
+        
+        // Statistics tracking
+        let tx_count = Arc::new(AtomicU64::new(0));
+        let rx_count = Arc::new(AtomicU64::new(0));
+        let tx_bytes = Arc::new(AtomicU64::new(0));
+        let rx_bytes = Arc::new(AtomicU64::new(0));
+        
+        // Task 1: Side A continuous TX loop
+        let side_a_transport = Arc::clone(&self.side_a.transport);
+        let tx_data = test_data.clone();
+        let tx_count_clone = Arc::clone(&tx_count);
+        let tx_bytes_clone = Arc::clone(&tx_bytes);
+        let tx_task = tokio::spawn(async move {
+            info!("Side A: Starting continuous TX loop...");
+            let mut local_count = 0u64;
+            let mut local_bytes = 0u64;
+            
+            while start_time.elapsed() < test_duration {
+                let mut transport = side_a_transport.lock().await;
+                match transport.send(&tx_data).await {
+                    Ok(_) => {
+                        local_count += 1;
+                        local_bytes += tx_data.len() as u64;
+                        
+                        // Update global counters every 100 transfers
+                        if local_count % 100 == 0 {
+                            tx_count_clone.fetch_add(100, Ordering::Relaxed);
+                            tx_bytes_clone.fetch_add(tx_data.len() as u64 * 100, Ordering::Relaxed);
+                        }
+                    }
+                    Err(e) => {
+                        warn!("TX failed: {}", e);
+                        break;
+                    }
+                }
+                drop(transport); // Release lock between sends
+                tokio::task::yield_now().await; // Allow other tasks to run
+            }
+            
+            // Final update
+            tx_count_clone.store(local_count, Ordering::Relaxed);
+            tx_bytes_clone.store(local_bytes, Ordering::Relaxed);
+            info!("Side A: TX loop completed - {} transfers, {} bytes", local_count, local_bytes);
+        });
+        
+        // Task 2: Side B continuous RX loop
+        let side_b_transport = Arc::clone(&self.side_b.transport);
+        let rx_count_clone = Arc::clone(&rx_count);
+        let rx_bytes_clone = Arc::clone(&rx_bytes);
+        let expected_size = test_data.len();
+        let rx_task = tokio::spawn(async move {
+            info!("Side B: Starting continuous RX loop...");
+            let mut local_count = 0u64;
+            let mut local_bytes = 0u64;
+            
+            while start_time.elapsed() < test_duration {
+                let mut transport = side_b_transport.lock().await;
+                match transport.receive(expected_size + 1024).await {
+                    Ok(received_data) => {
+                        local_count += 1;
+                        local_bytes += received_data.len() as u64;
+                        
+                        // Update global counters every 100 transfers
+                        if local_count % 100 == 0 {
+                            rx_count_clone.fetch_add(100, Ordering::Relaxed);
+                            rx_bytes_clone.fetch_add(received_data.len() as u64 * 100, Ordering::Relaxed);
+                        }
+                    }
+                    Err(e) => {
+                        warn!("RX failed: {}", e);
+                        tokio::time::sleep(Duration::from_millis(1)).await; // Brief pause on error
+                    }
+                }
+                drop(transport); // Release lock between receives
+                tokio::task::yield_now().await; // Allow other tasks to run
+            }
+            
+            // Final update
+            rx_count_clone.store(local_count, Ordering::Relaxed);
+            rx_bytes_clone.store(local_bytes, Ordering::Relaxed);
+            info!("Side B: RX loop completed - {} transfers, {} bytes", local_count, local_bytes);
+        });
+        
+        // Wait for both tasks to complete
+        let (tx_result, rx_result) = tokio::join!(tx_task, rx_task);
+        
+        // Check results
+        if let Err(e) = tx_result {
+            warn!("TX task failed: {}", e);
+        }
+        if let Err(e) = rx_result {
+            warn!("RX task failed: {}", e);
+        }
+        
+        // Print final statistics
+        let final_tx_count = tx_count.load(Ordering::Relaxed);
+        let final_rx_count = rx_count.load(Ordering::Relaxed);
+        let final_tx_bytes = tx_bytes.load(Ordering::Relaxed);
+        let final_rx_bytes = rx_bytes.load(Ordering::Relaxed);
+        let elapsed = start_time.elapsed();
+        
+        info!("=== One-Way Transfer Test Results ===");
+        info!("Duration: {:?}", elapsed);
+        info!("TX: {} transfers, {} MB ({} MB/s)", 
+              final_tx_count, 
+              final_tx_bytes / 1_000_000,
+              if elapsed.as_secs() > 0 { (final_tx_bytes / 1_000_000) / elapsed.as_secs() } else { 0 });
+        info!("RX: {} transfers, {} MB ({} MB/s)", 
+              final_rx_count, 
+              final_rx_bytes / 1_000_000,
+              if elapsed.as_secs() > 0 { (final_rx_bytes / 1_000_000) / elapsed.as_secs() } else { 0 });
+        info!("Transfer efficiency: {:.1}% ({}/{} packets)", 
+              if final_tx_count > 0 { (final_rx_count as f64 / final_tx_count as f64) * 100.0 } else { 0.0 },
+              final_rx_count, final_tx_count);
+        
+        Ok(())
+    }
+
     /// Run the complete loopback test
     pub async fn run_test(&mut self) -> Result<()> {
         info!("Starting PL-25A1 Loopback Test...");
@@ -472,12 +598,23 @@ impl LoopbackTestApp {
         // Basic connectivity test first
         match self.run_basic_connectivity_test().await {
             Ok(_) => {
-                info!("✓ Basic connectivity test passed, proceeding with main tests");
+                info!("✓ Basic connectivity test passed, proceeding with one-way test");
             }
             Err(e) => {
                 error!("Basic connectivity test failed: {}", e);
                 error!("Cannot proceed with main tests");
                 return Err(e);
+            }
+        }
+        
+        // Simple one-way transfer test
+        match self.run_simple_oneway_test().await {
+            Ok(_) => {
+                info!("✓ One-way transfer test completed, proceeding with main tests");
+            }
+            Err(e) => {
+                warn!("One-way transfer test failed: {}", e);
+                warn!("Continuing with main tests anyway...");
             }
         }
         
