@@ -211,6 +211,12 @@ impl AndroidUsbTransport {
             return Err(anyhow::anyhow!("USB send failed: {}", e));
         }
 
+        // Flush to ensure data is sent immediately
+        if let Err(e) = writer.flush().await {
+            self.is_connected = false;
+            return Err(anyhow::anyhow!("USB flush failed: {}", e));
+        }
+
         debug!(
             "Sent {} bytes to Android device {}",
             data.len(), self.device_id
