@@ -1,7 +1,6 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, ValueEnum};
 use dbgif_server::transport::{bridge_usb::BridgeUsbTransport, Transport};
-use dbgif_server::protocol::message::{Command, Message};
 use nusb::{list_devices, DeviceInfo, MaybeFuture};
 use rand::Rng;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -385,10 +384,9 @@ impl LoopbackTestApp {
             
             match timeout(Duration::from_secs(3), transport.receive(4096)).await {
                 Ok(Ok(raw_data)) => {
-                    let msg = Message::deserialize(raw_data.as_slice())?;
                     info!("✓ Side B: Received {} bytes: {:02x?}", 
-                          msg.data.len(), &msg.data[..]);
-                    Ok(msg.data.to_vec())
+                          raw_data.len(), &raw_data[..raw_data.len().min(8)]);
+                    Ok(raw_data)
                 }
                 Ok(Err(e)) => {
                     warn!("✗ Side B receive error: {}", e);
@@ -411,10 +409,8 @@ impl LoopbackTestApp {
                   test_data_clone.len(), test_data_clone);
             
             let mut transport = side_a_transport.lock().await;
-            let msg = Message::new(Command::Write, 0, 0, test_data_clone.clone());
-            let serialized_data = msg.serialize();
             
-            match transport.send(&serialized_data).await {
+            match transport.send(&test_data_clone).await {
                 Ok(_) => {
                     info!("✓ Side A: Data sent successfully");
                     Ok::<Vec<u8>, anyhow::Error>(test_data_clone)
@@ -529,75 +525,42 @@ impl LoopbackTestApp {
         }
     }
 
-    /// Send raw data and verify echo response (no protocol overhead)
+    /// Send raw data and verify echo response (maximum speed, no overhead)
     async fn send_and_verify(&mut self, data: &[u8]) -> Result<usize> {
         let start = Instant::now();
         
-        // Create a simple data packet - just raw bytes without protocol headers
-        let data_packet = data.to_vec();
-        
-        // Side A: Send raw data  
-        let send_result = {
+        // Side A: Send raw data directly (no error checking for speed)
+        {
             let mut transport_a = self.side_a.transport.lock().await;
-            // Use internal bulk transfer (we'll access the USB interface directly)
-            // For now, we'll use a dummy message structure to carry raw data
-            let dummy_msg = Message::new(
-                Command::Write,
-                0, 0, data_packet.clone()
-            );
-            let serialized_data = dummy_msg.serialize();
-            transport_a.send(&serialized_data).await
-        };
-        
-        if let Err(e) = send_result {
-            self.stats.record_error();
-            bail!("Failed to send raw data: {}", e);
+            transport_a.send(data).await?;
         }
         
-        // Side B: Receive and echo back
-        let _echo_data = {
+        // Side B: Receive and echo back (minimal overhead)
+        {
             let mut transport_b = self.side_b.transport.lock().await;
-            match timeout(OPERATION_TIMEOUT, transport_b.receive(4096)).await {
-                Ok(Ok(raw_data)) => {
-                    let received_msg = Message::deserialize(raw_data.as_slice())?;
-                    // Extract raw data and echo it back
-                    let echo_msg = Message::new(
-                        Command::Write,
-                        0, 0, received_msg.data.clone()
-                    );
-                    let serialized_echo = echo_msg.serialize();
-                    transport_b.send(&serialized_echo).await
-                        .context("Failed to echo data back")?;
-                    received_msg.data
-                }
-                Ok(Err(e)) => bail!("Failed to receive data: {}", e),
-                Err(_) => bail!("Timeout receiving data"),
-            }
-        };
+            let raw_data = transport_b.receive(data.len() + 1024).await?;
+            transport_b.send(&raw_data).await?;
+        }
         
-        // Side A: Receive echo
+        // Side A: Receive echo (minimal overhead)
         let echo_response = {
             let mut transport_a = self.side_a.transport.lock().await;
-            let raw_data = timeout(OPERATION_TIMEOUT, transport_a.receive(4096)).await
-                .context("Timeout waiting for echo")?
-                .context("Failed to receive echo")?;
-            Message::deserialize(raw_data.as_slice())
-                .context("Failed to deserialize echo message")
-                .context("Failed to receive echo")?
+            transport_a.receive(data.len() + 1024).await?
         };
         
         let latency = start.elapsed();
         
-        // Verify data integrity  
-        if echo_response.data != data {
+        // Quick data integrity check
+        if echo_response.len() != data.len() || echo_response != data {
             self.stats.record_error();
             bail!("Data mismatch: sent {} bytes, received {} bytes", 
-                  data.len(), echo_response.data.len());
+                  data.len(), echo_response.len());
         }
         
         // Record statistics
-        self.stats.record_transfer(data.len(), echo_response.data.len(), latency);
+        self.stats.record_transfer(data.len(), echo_response.len(), latency);
         
+        // Only add delay if explicitly requested
         if self.args.delay > 0 {
             tokio::time::sleep(Duration::from_millis(self.args.delay)).await;
         }
