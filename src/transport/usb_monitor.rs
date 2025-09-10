@@ -1,6 +1,6 @@
 use anyhow::Result;
 use futures::StreamExt;
-use nusb::{DeviceId, DeviceInfo};
+use nusb::{DeviceId, DeviceInfo, MaybeFuture};
 use nusb::hotplug::HotplugEvent;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
@@ -246,7 +246,7 @@ impl UsbMonitor {
     async fn handle_device_left(
         transport_manager: &Arc<TransportManager>,
         device_map: &Arc<RwLock<HashMap<DeviceKey, String>>>,
-        device_id: DeviceId,
+        _device_id: DeviceId,
     ) -> Result<()> {
         // Try to find device by device_id mapping (this is approximate)
         let mut map = device_map.write().await;
@@ -278,7 +278,7 @@ impl UsbMonitor {
         transport_manager: &Arc<TransportManager>,
         device_map: &Arc<RwLock<HashMap<DeviceKey, String>>>,
     ) -> Result<()> {
-        let devices = nusb::list_devices()?;
+        let devices = nusb::list_devices().wait()?;
         
         for device_info in devices {
             let udev_info = get_device_info(&device_info)?;
@@ -360,7 +360,7 @@ impl UsbMonitor {
                                 for factory in factories.iter() {
                                     if factory.name() == factory_name {
                                         // Re-enumerate to get Device object
-                                        if let Ok(devices) = nusb::list_devices() {
+                                        if let Ok(devices) = nusb::list_devices().wait() {
                                             for device_info in devices {
                                                 if let Ok(info) = get_device_info(&device_info) {
                                                     if info.bus_number == snapshot.info.bus_number &&
@@ -426,7 +426,7 @@ impl UsbMonitor {
         tokio::task::spawn_blocking({
             let factories = Arc::clone(factories);
             move || -> Result<Vec<DeviceSnapshot>> {
-                let devices = nusb::list_devices()?;
+                let devices = nusb::list_devices().wait()?;
                 let mut snapshots = Vec::new();
 
                 for device in devices {

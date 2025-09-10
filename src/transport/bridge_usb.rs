@@ -1,11 +1,12 @@
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
-use nusb::{DeviceInfo, Interface};
-use nusb::transfer::RequestBuffer;
-use nusb::transfer::{ControlIn, ControlOut, ControlType, Recipient};
+use nusb::{DeviceInfo, Interface, MaybeFuture};
+use nusb::transfer::{ControlIn, ControlOut, ControlType, Recipient, Bulk, In, Out, Interrupt};
+use nusb::io::{EndpointRead, EndpointWrite};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, info, warn};
 
 use super::{ConnectionStatus, Transport, TransportType, UsbTransportFactory};
@@ -78,6 +79,10 @@ impl PL25A1ConnectionState {
 pub struct BridgeUsbTransport {
     device_id: String,
     interface: Arc<Mutex<Interface>>,
+    // Pre-created endpoints for better performance
+    bulk_out_writer: Arc<Mutex<EndpointWrite<Bulk>>>,
+    bulk_in_reader: Arc<Mutex<EndpointRead<Bulk>>>,
+    interrupt_reader: Arc<Mutex<EndpointRead<Interrupt>>>,
     is_connected: bool,
 }
 
@@ -96,20 +101,37 @@ impl BridgeUsbTransport {
         // Generate device ID from serial or bus:address
         let device_id = match device_info.serial_number() {
             Some(serial) => format!("pl25a1_{}", serial),
-            None => format!("pl25a1_{}:{}", device_info.bus_number(), device_info.device_address()),
+            None => format!("pl25a1_{}:{}", device_info.bus_id(), device_info.device_address()),
         };
 
         // Open device and claim interface
-        let device = device_info.open().context("Failed to open USB device")?;
+        let device = device_info.open().wait().context("Failed to open USB device")?;
         let interface = device
             .claim_interface(USB_INTERFACE)
+            .wait()
             .context("Failed to claim USB interface")?;
+
+        // Create pre-configured endpoints for better performance
+        let bulk_out_endpoint = interface.endpoint::<Bulk, Out>(BULK_OUT_EP)
+            .context("Failed to open bulk out endpoint")?;
+        let bulk_out_writer = bulk_out_endpoint.writer(MAXDATA);
+        
+        let bulk_in_endpoint = interface.endpoint::<Bulk, In>(BULK_IN_EP)
+            .context("Failed to open bulk in endpoint")?;
+        let bulk_in_reader = bulk_in_endpoint.reader(MAXDATA);
+        
+        let interrupt_endpoint = interface.endpoint::<Interrupt, In>(INTERRUPT_IN_EP)
+            .context("Failed to open interrupt in endpoint")?;
+        let interrupt_reader = interrupt_endpoint.reader(64);
 
         info!("PL-25A1 USB device {} initialized", device_id);
 
         let transport = Self {
             device_id,
             interface: Arc::new(Mutex::new(interface)),
+            bulk_out_writer: Arc::new(Mutex::new(bulk_out_writer)),
+            bulk_in_reader: Arc::new(Mutex::new(bulk_in_reader)),
+            interrupt_reader: Arc::new(Mutex::new(interrupt_reader)),
             is_connected: true,
         };
 
@@ -141,17 +163,16 @@ impl BridgeUsbTransport {
             length: 2,
         };
         
-        let completion = interface
-            .control_in(control_req)
-            .await;
+        let data = interface
+            .control_in(control_req, USB_TIMEOUT)
+            .await
+            .context("Failed to read connection state")?;
         
-        completion.status.context("Failed to read connection state")?;
-        
-        if completion.data.len() != 2 {
-            bail!("Invalid connection state response length: {}", completion.data.len());
+        if data.len() != 2 {
+            bail!("Invalid connection state response length: {}", data.len());
         }
 
-        Ok(PL25A1ConnectionState::from_bytes([completion.data[0], completion.data[1]]))
+        Ok(PL25A1ConnectionState::from_bytes([data[0], data[1]]))
     }
 
     /// Query feature status using vendor command 0xF7
@@ -167,17 +188,16 @@ impl BridgeUsbTransport {
             length: 2,
         };
         
-        let completion = interface
-            .control_in(control_req)
-            .await;
+        let data = interface
+            .control_in(control_req, USB_TIMEOUT)
+            .await
+            .context("Failed to query feature status")?;
         
-        completion.status.context("Failed to query feature status")?;
-        
-        if completion.data.len() != 2 {
-            bail!("Invalid feature status response length: {}", completion.data.len());
+        if data.len() != 2 {
+            bail!("Invalid feature status response length: {}", data.len());
         }
 
-        Ok([completion.data[0], completion.data[1]])
+        Ok([data[0], data[1]])
     }
 
     /// Set feature configuration using vendor command 0xF8
@@ -193,11 +213,10 @@ impl BridgeUsbTransport {
             data: config.as_slice(),
         };
         
-        let completion = interface
-            .control_out(control_req)
-            .await;
-        
-        completion.status.context("Failed to set feature config")?;
+        interface
+            .control_out(control_req, USB_TIMEOUT)
+            .await
+            .context("Failed to set feature config")?;
 
         Ok(())
     }
@@ -215,11 +234,10 @@ impl BridgeUsbTransport {
             data: &[],
         };
         
-        let completion = interface
-            .control_out(control_req)
-            .await;
-        
-        completion.status.context("Failed to power off device")?;
+        interface
+            .control_out(control_req, USB_TIMEOUT)
+            .await
+            .context("Failed to power off device")?;
 
         Ok(())
     }
@@ -237,30 +255,28 @@ impl BridgeUsbTransport {
             data: &[],
         };
         
-        let completion = interface
-            .control_out(control_req)
-            .await;
-        
-        completion.status.context("Failed to reset device")?;
+        interface
+            .control_out(control_req, USB_TIMEOUT)
+            .await
+            .context("Failed to reset device")?;
 
         Ok(())
     }
 
     /// Poll interrupt endpoint for connection status updates
     pub async fn poll_interrupt(&self) -> Result<Vec<u8>> {
-        let interface = self.interface.lock().await;
-        let request_buffer = RequestBuffer::new(64);
+        let mut reader = self.interrupt_reader.lock().await;
         
+        let mut buffer = vec![0u8; 64];
         match tokio::time::timeout(
             INTERRUPT_TIMEOUT,
-            interface.interrupt_in(INTERRUPT_IN_EP, request_buffer),
+            reader.read(&mut buffer),
         ).await {
-            Ok(completion) => {
-                match completion.status {
-                    Ok(()) => Ok(completion.data),
-                    Err(e) => Err(e.into()),
-                }
+            Ok(Ok(size)) => {
+                buffer.truncate(size);
+                Ok(buffer)
             }
+            Ok(Err(e)) => Err(e.into()),
             Err(_) => Ok(Vec::new()), // Timeout, no data
         }
     }
@@ -309,32 +325,14 @@ impl BridgeUsbTransport {
         }
     }
 
-    /// Send data to USB device (header first, then remaining data)
+    /// Send data to USB device
     async fn send_bytes_internal(&mut self, data: &[u8]) -> Result<()> {
-        if data.len() < 24 {
-            return Err(anyhow::anyhow!("Data too short, expected at least 24 bytes for header"));
-        }
+        let mut writer = self.bulk_out_writer.lock().await;
 
-        // Split into header (24 bytes) and remaining data
-        let header = &data[..24];
-        let payload = &data[24..];
-
-        let interface = self.interface.lock().await;
-
-        // Send header first
-        let completion = interface.bulk_out(BULK_OUT_EP, header.to_vec()).await;
-        if let Err(e) = completion.status {
+        // Send all data at once
+        if let Err(e) = writer.write_all(data).await {
             self.is_connected = false;
-            return Err(anyhow::anyhow!("Header send failed: {}", e));
-        }
-
-        // Send remaining data if present
-        if !payload.is_empty() {
-            let completion = interface.bulk_out(BULK_OUT_EP, payload.to_vec()).await;
-            if let Err(e) = completion.status {
-                self.is_connected = false;
-                return Err(anyhow::anyhow!("Data send failed: {}", e));
-            }
+            return Err(anyhow::anyhow!("USB send failed: {}", e));
         }
 
         debug!(
@@ -347,7 +345,6 @@ impl BridgeUsbTransport {
     /// Receive data from USB device with specified buffer size
     /// Returns (data, actual_received_size)
     async fn receive_bytes_internal(&mut self, buffer_size: usize) -> Result<(Vec<u8>, usize)> {
-        let interface = self.interface.lock().await;
 
         // Align buffer size down to USB packet boundary for optimal transfer
         let aligned_size = (buffer_size / USB_BULK_MAX_PACKET_SIZE) * USB_BULK_MAX_PACKET_SIZE;
@@ -357,16 +354,19 @@ impl BridgeUsbTransport {
             aligned_size.min(MAXDATA) 
         };
         
-        let request_buffer = RequestBuffer::new(final_size);
-        let completion = interface.bulk_in(BULK_IN_EP, request_buffer).await;
+        let mut reader = self.bulk_in_reader.lock().await;
         
-        if let Err(e) = completion.status {
-            self.is_connected = false;
-            return Err(anyhow::anyhow!("USB receive failed: {}", e));
-        }
+        let mut buffer = vec![0u8; final_size];
+        let actual_size = match reader.read(&mut buffer).await {
+            Ok(size) => size,
+            Err(e) => {
+                self.is_connected = false;
+                return Err(anyhow::anyhow!("USB receive failed: {}", e));
+            }
+        };
         
-        let received_data = completion.data;
-        let actual_size = received_data.len();
+        buffer.truncate(actual_size);
+        let received_data = buffer;
 
         debug!(
             "Received {} bytes from PL-25A1 device {} (requested: {}, aligned: {})",

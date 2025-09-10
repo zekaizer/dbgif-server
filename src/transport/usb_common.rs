@@ -65,7 +65,18 @@ pub fn get_device_info(device_info: &DeviceInfo) -> Result<UsbDeviceInfo> {
     // nusb DeviceInfo provides direct access to device properties
     let vendor_id = device_info.vendor_id();
     let product_id = device_info.product_id();
-    let bus_number = device_info.bus_number();
+    // Parse bus_id string to extract bus number (for compatibility)
+    let bus_number = device_info.bus_id()
+        .parse::<u8>()
+        .unwrap_or_else(|_| {
+            // Fallback: try to extract numeric part from string like "usb-0001"
+            device_info.bus_id()
+                .chars()
+                .filter(|c| c.is_ascii_digit())
+                .collect::<String>()
+                .parse::<u8>()
+                .unwrap_or(0)
+        });
     let address = device_info.device_address();
     
     // Get serial number if available

@@ -1,11 +1,13 @@
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
-use nusb::{DeviceInfo, Interface};
-use nusb::transfer::RequestBuffer;
+use nusb::{DeviceInfo, Interface, MaybeFuture};
+use nusb::transfer::{Bulk, In, Out};
+use nusb::io::{EndpointRead, EndpointWrite};
 // Control transfer imports not needed for Android USB
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, info};
 
 use super::{ConnectionStatus, Transport, TransportType, UsbTransportFactory};
@@ -98,6 +100,9 @@ const USB_BULK_MAX_PACKET_SIZE: usize = 64;
 pub struct AndroidUsbTransport {
     device_id: String,
     interface: Arc<Mutex<Interface>>,
+    // Pre-created endpoints for better performance
+    bulk_out_writer: Arc<Mutex<EndpointWrite<Bulk>>>,
+    bulk_in_reader: Arc<Mutex<EndpointRead<Bulk>>>,
     is_connected: bool,
     vendor_id: u16,
     product_id: u16,
@@ -112,14 +117,24 @@ impl AndroidUsbTransport {
         // Get device serial number or use bus:address as fallback
         let device_id = match device_info.serial_number() {
             Some(serial) => serial.to_string(),
-            None => format!("android_{}:{}", device_info.bus_number(), device_info.device_address()),
+            None => format!("android_{}:{}", device_info.bus_id(), device_info.device_address()),
         };
 
         // Open device and claim interface
-        let device = device_info.open().context("Failed to open USB device")?;
+        let device = device_info.open().wait().context("Failed to open USB device")?;
         let interface = device
             .claim_interface(USB_INTERFACE)
+            .wait()
             .context("Failed to claim USB interface")?;
+
+        // Create pre-configured endpoints for better performance
+        let bulk_out_endpoint = interface.endpoint::<Bulk, Out>(BULK_OUT_EP)
+            .context("Failed to open bulk out endpoint")?;
+        let bulk_out_writer = bulk_out_endpoint.writer(MAXDATA);
+        
+        let bulk_in_endpoint = interface.endpoint::<Bulk, In>(BULK_IN_EP)
+            .context("Failed to open bulk in endpoint")?;
+        let bulk_in_reader = bulk_in_endpoint.reader(MAXDATA);
 
         info!(
             "Android USB device {} ({:04x}:{:04x}) initialized",
@@ -129,41 +144,22 @@ impl AndroidUsbTransport {
         Ok(Self {
             device_id,
             interface: Arc::new(Mutex::new(interface)),
+            bulk_out_writer: Arc::new(Mutex::new(bulk_out_writer)),
+            bulk_in_reader: Arc::new(Mutex::new(bulk_in_reader)),
             is_connected: true,
             vendor_id,
             product_id,
         })
     }
 
-    /// Send data to USB device (header first, then remaining data)
+    /// Send data to USB device
     async fn send_bytes_internal(&mut self, data: &[u8]) -> Result<()> {
-        if data.len() < 24 {
-            return Err(anyhow::anyhow!("Data too short, expected at least 24 bytes for header"));
-        }
+        let mut writer = self.bulk_out_writer.lock().await;
 
-        // Split into header (24 bytes) and remaining data
-        let header = &data[..24];
-        let payload = &data[24..];
-
-        let interface = self.interface.lock().await;
-
-        // Send header first
-        let completion = interface.bulk_out(BULK_OUT_EP, header.to_vec()).await;
-        if let Err(e) = completion.status {
+        // Send all data at once
+        if let Err(e) = writer.write_all(data).await {
             self.is_connected = false;
-            return Err(anyhow::anyhow!("Header send failed: {}", e));
-        }
-        
-        // Note: nusb bulk transfers should send the complete buffer
-        // No need to check partial sends as in rusb
-
-        // Send remaining data if present
-        if !payload.is_empty() {
-            let completion = interface.bulk_out(BULK_OUT_EP, payload.to_vec()).await;
-            if let Err(e) = completion.status {
-                self.is_connected = false;
-                return Err(anyhow::anyhow!("Data send failed: {}", e));
-            }
+            return Err(anyhow::anyhow!("USB send failed: {}", e));
         }
 
         debug!(
@@ -176,7 +172,6 @@ impl AndroidUsbTransport {
     /// Receive data from USB device with specified buffer size
     /// Returns (data, actual_received_size)
     async fn receive_bytes_internal(&mut self, buffer_size: usize) -> Result<(Vec<u8>, usize)> {
-        let interface = self.interface.lock().await;
 
         // Align buffer size down to USB packet boundary for optimal transfer
         let aligned_size = (buffer_size / USB_BULK_MAX_PACKET_SIZE) * USB_BULK_MAX_PACKET_SIZE;
@@ -186,16 +181,19 @@ impl AndroidUsbTransport {
             aligned_size.min(MAXDATA) 
         };
         
-        let request_buffer = RequestBuffer::new(final_size);
-        let completion = interface.bulk_in(BULK_IN_EP, request_buffer).await;
+        let mut reader = self.bulk_in_reader.lock().await;
         
-        if let Err(e) = completion.status {
-            self.is_connected = false;
-            return Err(anyhow::anyhow!("USB receive failed: {}", e));
-        }
+        let mut buffer = vec![0u8; final_size];
+        let actual_size = match reader.read(&mut buffer).await {
+            Ok(size) => size,
+            Err(e) => {
+                self.is_connected = false;
+                return Err(anyhow::anyhow!("USB receive failed: {}", e));
+            }
+        };
         
-        let received_data = completion.data;
-        let actual_size = received_data.len();
+        buffer.truncate(actual_size);
+        let received_data = buffer;
 
         debug!(
             "Received {} bytes from Android device {} (requested: {}, aligned: {})",
