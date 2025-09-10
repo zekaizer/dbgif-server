@@ -2,7 +2,7 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, ValueEnum};
 use dbgif_server::transport::{bridge_usb::BridgeUsbTransport, Transport};
 use dbgif_server::protocol::message::{Command, Message};
-use nusb::{list_devices, DeviceInfo};
+use nusb::{list_devices, DeviceInfo, MaybeFuture};
 use rand::Rng;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -337,7 +337,7 @@ impl LoopbackTestApp {
     }
 
     async fn find_pl25a1_devices() -> Result<Vec<DeviceInfo>> {
-        let devices: Vec<DeviceInfo> = list_devices()?
+        let devices: Vec<DeviceInfo> = list_devices().wait()?
             .filter(|device| {
                 device.vendor_id() == PL25A1_VID && device.product_id() == PL25A1_PID
             })
