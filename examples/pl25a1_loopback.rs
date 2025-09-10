@@ -321,7 +321,7 @@ impl LoopbackTestApp {
                 .with_context(|| format!("Failed to initialize device for {}", side))?;
             
             info!("Initialized {} - Device: {}, Connector ID: {}", 
-                  side, endpoint.device_id, endpoint.connector_id);
+                  side, endpoint.device_id, if endpoint.connector_id { "B" } else { "A" });
             endpoints.push(endpoint);
         }
         

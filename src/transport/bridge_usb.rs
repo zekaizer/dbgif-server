@@ -208,7 +208,8 @@ impl BridgeUsbTransport {
                 let (local_id, remote_id) = state.get_connector_id();
                 info!(
                     "PL-25A1 connection state - Local: 0x{:02x}, Remote: 0x{:02x}, Ready: {}, Connector IDs: ({}, {})",
-                    state.local_state, state.remote_state, state.is_ready(), local_id, remote_id
+                    state.local_state, state.remote_state, state.is_ready(), 
+                    if local_id { "B" } else { "A" }, if remote_id { "B" } else { "A" }
                 );
             }
             Err(e) => warn!("Failed to get initial connection state: {}", e),
@@ -519,7 +520,8 @@ impl Transport for BridgeUsbTransport {
                 let (local_id, remote_id) = state.get_connector_id();
                 debug!(
                     "PL-25A1 initial state - Local: 0x{:02x}, Remote: 0x{:02x}, Ready: {}, Disconnected: {}, Connector IDs: ({}, {})",
-                    state.local_state, state.remote_state, state.is_ready(), state.is_disconnected(), local_id, remote_id
+                    state.local_state, state.remote_state, state.is_ready(), state.is_disconnected(),
+                    if local_id { "B" } else { "A" }, if remote_id { "B" } else { "A" }
                 );
             }
             Err(e) => {
