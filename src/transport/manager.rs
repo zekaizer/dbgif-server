@@ -122,10 +122,11 @@ impl TransportManager {
 
     /// Send message to specific transport
     pub async fn send_message(&self, device_id: &str, message: &Message) -> Result<()> {
+        let serialized_data = message.serialize();
         let mut transports = self.transports.write().await;
 
         match transports.get_mut(device_id) {
-            Some(transport) => transport.send_message(message).await.map_err(|e| {
+            Some(transport) => transport.send(&serialized_data).await.map_err(|e| {
                 error!("Failed to send message to {}: {}", device_id, e);
                 e
             }),
@@ -138,10 +139,17 @@ impl TransportManager {
         let mut transports = self.transports.write().await;
 
         match transports.get_mut(device_id) {
-            Some(transport) => transport.receive_message().await.map_err(|e| {
-                error!("Failed to receive message from {}: {}", device_id, e);
-                e
-            }),
+            Some(transport) => {
+                let raw_data = transport.receive().await.map_err(|e| {
+                    error!("Failed to receive data from {}: {}", device_id, e);
+                    e
+                })?;
+                
+                Message::deserialize(raw_data.as_slice()).map_err(|e| {
+                    error!("Failed to deserialize message from {}: {}", device_id, e);
+                    e
+                })
+            },
             None => Err(anyhow::anyhow!("Transport not found: {}", device_id)),
         }
     }

@@ -10,7 +10,6 @@ use tracing::{debug, info};
 
 use super::{ConnectionStatus, Transport, TransportType, UsbTransportFactory};
 use crate::protocol::constants::MAXDATA;
-use crate::protocol::message::Message;
 
 // Android device VID/PID pairs for ADB interface
 const SUPPORTED_ANDROID_DEVICES: &[(u16, u16)] = &[
@@ -133,13 +132,15 @@ impl AndroidUsbTransport {
         })
     }
 
-    /// Send message to USB device (header first, then data)
-    async fn send_message_internal(&mut self, message: &Message) -> Result<()> {
-        let serialized = message.serialize();
+    /// Send data to USB device (header first, then remaining data)
+    async fn send_bytes_internal(&mut self, data: &[u8]) -> Result<()> {
+        if data.len() < 24 {
+            return Err(anyhow::anyhow!("Data too short, expected at least 24 bytes for header"));
+        }
 
-        // Split into header (24 bytes) and data
-        let header = &serialized[..24];
-        let data = &serialized[24..];
+        // Split into header (24 bytes) and remaining data
+        let header = &data[..24];
+        let payload = &data[24..];
 
         let interface = self.interface.lock().await;
 
@@ -153,9 +154,9 @@ impl AndroidUsbTransport {
         // Note: nusb bulk transfers should send the complete buffer
         // No need to check partial sends as in rusb
 
-        // Send data if present
-        if !data.is_empty() {
-            let completion = interface.bulk_out(BULK_OUT_EP, data.to_vec()).await;
+        // Send remaining data if present
+        if !payload.is_empty() {
+            let completion = interface.bulk_out(BULK_OUT_EP, payload.to_vec()).await;
             if let Err(e) = completion.status {
                 self.is_connected = false;
                 return Err(anyhow::anyhow!("Data send failed: {}", e));
@@ -163,14 +164,14 @@ impl AndroidUsbTransport {
         }
 
         debug!(
-            "Sent message to Android device {}: {:?}",
-            self.device_id, message.command
+            "Sent {} bytes to Android device {}",
+            data.len(), self.device_id
         );
         Ok(())
     }
 
-    /// Receive message from USB device
-    async fn receive_message_internal(&mut self) -> Result<Message> {
+    /// Receive data from USB device
+    async fn receive_bytes_internal(&mut self) -> Result<Vec<u8>> {
         let interface = self.interface.lock().await;
 
         // Read header first (24 bytes)
@@ -229,12 +230,11 @@ impl AndroidUsbTransport {
             full_data.extend_from_slice(&completion.data);
         }
 
-        let message = Message::deserialize(full_data.as_slice()).context("Failed to deserialize message")?;
         debug!(
-            "Received message from Android device {}: {:?}",
-            self.device_id, message.command
+            "Received {} bytes from Android device {}",
+            full_data.len(), self.device_id
         );
-        Ok(message)
+        Ok(full_data)
     }
 
     /// Check connection status by attempting a simple operation
@@ -259,18 +259,18 @@ impl AndroidUsbTransport {
 
 #[async_trait]
 impl Transport for AndroidUsbTransport {
-    async fn send_message(&mut self, message: &Message) -> Result<()> {
+    async fn send(&mut self, data: &[u8]) -> Result<()> {
         if !self.is_connected {
             bail!("Android device {} is not connected", self.device_id);
         }
-        self.send_message_internal(message).await
+        self.send_bytes_internal(data).await
     }
 
-    async fn receive_message(&mut self) -> Result<Message> {
+    async fn receive(&mut self) -> Result<Vec<u8>> {
         if !self.is_connected {
             bail!("Android device {} is not connected", self.device_id);
         }
-        self.receive_message_internal().await
+        self.receive_bytes_internal().await
     }
 
     fn device_id(&self) -> &str {

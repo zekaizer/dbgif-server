@@ -7,7 +7,6 @@ use tokio::net::TcpStream;
 use tracing::{debug, error};
 
 use super::{ConnectionStatus, Transport, TransportType};
-use crate::protocol::message::Message;
 
 pub struct TcpTransport {
     client_id: String,
@@ -32,7 +31,7 @@ impl TcpTransport {
         }
     }
 
-    async fn read_message_internal(&mut self) -> Result<Option<Message>> {
+    async fn read_bytes_internal(&mut self) -> Result<Option<Vec<u8>>> {
         let stream = self
             .stream
             .as_mut()
@@ -61,13 +60,13 @@ impl TcpTransport {
         let data_length = buf.get_u32_le();
 
         // Read data payload if present
-        let mut full_message = BytesMut::with_capacity(24 + data_length as usize);
-        full_message.extend_from_slice(&header);
+        let mut full_data = Vec::with_capacity(24 + data_length as usize);
+        full_data.extend_from_slice(&header);
 
         if data_length > 0 {
             let mut data = vec![0u8; data_length as usize];
             match stream.read_exact(&mut data).await {
-                Ok(_) => full_message.extend_from_slice(&data),
+                Ok(_) => full_data.extend_from_slice(&data),
                 Err(e) => {
                     self.is_connected = false;
                     return Err(e.into());
@@ -75,29 +74,24 @@ impl TcpTransport {
             }
         }
 
-        let message = Message::deserialize(full_message.freeze())?;
-        Ok(Some(message))
+        Ok(Some(full_data))
     }
 
-    async fn send_message_internal(&mut self, message: &Message) -> Result<()> {
+    async fn send_bytes_internal(&mut self, data: &[u8]) -> Result<()> {
         let stream = self
             .stream
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("Stream not connected"))?;
 
-        let data = message.serialize();
-        match stream.write_all(&data).await {
+        match stream.write_all(data).await {
             Ok(_) => {
-                debug!(
-                    "TCP client {} sent message: {:?}",
-                    self.client_id, message.command
-                );
+                debug!("TCP client {} sent {} bytes", self.client_id, data.len());
                 Ok(())
             }
             Err(e) => {
                 self.is_connected = false;
                 error!(
-                    "Failed to send message to TCP client {}: {}",
+                    "Failed to send data to TCP client {}: {}",
                     self.client_id, e
                 );
                 Err(e.into())
@@ -108,13 +102,13 @@ impl TcpTransport {
 
 #[async_trait]
 impl Transport for TcpTransport {
-    async fn send_message(&mut self, message: &Message) -> Result<()> {
-        self.send_message_internal(message).await
+    async fn send(&mut self, data: &[u8]) -> Result<()> {
+        self.send_bytes_internal(data).await
     }
 
-    async fn receive_message(&mut self) -> Result<Message> {
-        match self.read_message_internal().await? {
-            Some(message) => Ok(message),
+    async fn receive(&mut self) -> Result<Vec<u8>> {
+        match self.read_bytes_internal().await? {
+            Some(data) => Ok(data),
             None => Err(anyhow::anyhow!("Connection closed")),
         }
     }
@@ -163,7 +157,6 @@ impl Transport for TcpTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{Command, Message};
     use tokio::net::{TcpListener, TcpStream};
 
     #[tokio::test]

@@ -9,7 +9,7 @@ use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
-use super::{get_device_info, Transport, TransportManager, UsbDeviceInfo, UsbTransportFactory};
+use super::{get_device_info, TransportManager, UsbDeviceInfo, UsbTransportFactory};
 
 /// USB device identifier (bus_number, address)
 type DeviceKey = (u8, u8);

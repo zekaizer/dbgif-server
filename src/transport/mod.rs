@@ -2,8 +2,6 @@ use anyhow::Result;
 use async_trait::async_trait;
 use std::fmt;
 
-use crate::protocol::message::Message;
-
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TransportType {
     Tcp,
@@ -66,8 +64,8 @@ impl fmt::Display for ConnectionStatus {
 
 #[async_trait]
 pub trait Transport: Send + Sync {
-    async fn send_message(&mut self, message: &Message) -> Result<()>;
-    async fn receive_message(&mut self) -> Result<Message>;
+    async fn send(&mut self, data: &[u8]) -> Result<()>;
+    async fn receive(&mut self) -> Result<Vec<u8>>;
 
     /// Attempt to establish connection and return current status
     /// 

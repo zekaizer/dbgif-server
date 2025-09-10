@@ -3,7 +3,6 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 use super::{ConnectionStatus, Transport, TransportType};
-use crate::protocol::Message;
 
 #[cfg(feature = "transport-debug")]
 mod debug_enabled {
@@ -57,39 +56,32 @@ mod debug_enabled {
         }
 
         #[inline]
-        fn log_raw_message(&self, direction: &str, message: &Message) {
+        fn log_raw_data(&self, direction: &str, data: &[u8]) {
             if !self.is_debug_enabled() {
                 return;
             }
 
-            let raw_data = message.serialize();
-
             debug!(
-                "{} [{}] {} - {} bytes: cmd={:?}(0x{:08X}) arg0=0x{:08X} arg1=0x{:08X} data_len={}",
+                "{} [{}] {} - {} bytes",
                 direction,
                 self.device_id,
                 self.inner.transport_type(),
-                raw_data.len(),
-                message.command,
-                message.command.to_u32(),
-                message.arg0,
-                message.arg1,
-                message.data.len()
+                data.len()
             );
 
-            if raw_data.len() <= 64 {
+            if data.len() <= 64 {
                 debug!(
                     "{} [{}] Raw: {}",
                     direction,
                     self.device_id,
-                    format_bytes_inline(&raw_data, Some(32))
+                    format_bytes_inline(data, Some(32))
                 );
             } else {
                 debug!(
                     "{} [{}] Raw (first 32 bytes): {}",
                     direction,
                     self.device_id,
-                    format_bytes_inline(&raw_data, Some(32))
+                    format_bytes_inline(data, Some(32))
                 );
             }
 
@@ -107,16 +99,16 @@ mod debug_enabled {
     #[async_trait]
     impl Transport for DebugTransport {
         #[inline]
-        async fn send_message(&mut self, message: &Message) -> Result<()> {
+        async fn send(&mut self, data: &[u8]) -> Result<()> {
             if self.is_debug_enabled() {
-                self.log_raw_message("TX", message);
+                self.log_raw_data("TX", data);
             }
 
-            let result = self.inner.send_message(message).await;
+            let result = self.inner.send(data).await;
 
             if self.is_debug_enabled() {
                 match &result {
-                    Ok(_) => debug!("TX [{}] Message sent successfully", self.device_id),
+                    Ok(_) => debug!("TX [{}] Data sent successfully", self.device_id),
                     Err(e) => debug!("TX [{}] Send failed: {}", self.device_id, e),
                 }
             }
@@ -125,14 +117,14 @@ mod debug_enabled {
         }
 
         #[inline]
-        async fn receive_message(&mut self) -> Result<Message> {
-            let result = self.inner.receive_message().await;
+        async fn receive(&mut self) -> Result<Vec<u8>> {
+            let result = self.inner.receive().await;
 
             match &result {
-                Ok(message) => {
+                Ok(data) => {
                     if self.is_debug_enabled() {
-                        self.log_raw_message("RX", message);
-                        debug!("RX [{}] Message received successfully", self.device_id);
+                        self.log_raw_data("RX", data);
+                        debug!("RX [{}] Data received successfully", self.device_id);
                     }
                 }
                 Err(e) => {
@@ -251,13 +243,13 @@ mod debug_disabled {
     #[async_trait]
     impl Transport for DebugTransport {
         #[inline(always)]
-        async fn send_message(&mut self, message: &Message) -> Result<()> {
-            self.inner.send_message(message).await
+        async fn send(&mut self, data: &[u8]) -> Result<()> {
+            self.inner.send(data).await
         }
 
         #[inline(always)]
-        async fn receive_message(&mut self) -> Result<Message> {
-            self.inner.receive_message().await
+        async fn receive(&mut self) -> Result<Vec<u8>> {
+            self.inner.receive().await
         }
 
         #[inline(always)]

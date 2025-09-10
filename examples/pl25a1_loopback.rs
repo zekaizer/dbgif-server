@@ -383,8 +383,9 @@ impl LoopbackTestApp {
             info!("Side B: Starting receive (waiting for data)...");
             let mut transport = side_b_transport.lock().await;
             
-            match timeout(Duration::from_secs(3), transport.receive_message()).await {
-                Ok(Ok(msg)) => {
+            match timeout(Duration::from_secs(3), transport.receive()).await {
+                Ok(Ok(raw_data)) => {
+                    let msg = Message::deserialize(raw_data.as_slice())?;
                     info!("✓ Side B: Received {} bytes: {:02x?}", 
                           msg.data.len(), &msg.data[..]);
                     Ok(msg.data.to_vec())
@@ -411,8 +412,9 @@ impl LoopbackTestApp {
             
             let mut transport = side_a_transport.lock().await;
             let msg = Message::new(Command::Write, 0, 0, test_data_clone.clone());
+            let serialized_data = msg.serialize();
             
-            match transport.send_message(&msg).await {
+            match transport.send(&serialized_data).await {
                 Ok(_) => {
                     info!("✓ Side A: Data sent successfully");
                     Ok::<Vec<u8>, anyhow::Error>(test_data_clone)
@@ -543,7 +545,8 @@ impl LoopbackTestApp {
                 Command::Write,
                 0, 0, data_packet.clone()
             );
-            transport_a.send_message(&dummy_msg).await
+            let serialized_data = dummy_msg.serialize();
+            transport_a.send(&serialized_data).await
         };
         
         if let Err(e) = send_result {
@@ -554,14 +557,16 @@ impl LoopbackTestApp {
         // Side B: Receive and echo back
         let _echo_data = {
             let mut transport_b = self.side_b.transport.lock().await;
-            match timeout(OPERATION_TIMEOUT, transport_b.receive_message()).await {
-                Ok(Ok(received_msg)) => {
+            match timeout(OPERATION_TIMEOUT, transport_b.receive()).await {
+                Ok(Ok(raw_data)) => {
+                    let received_msg = Message::deserialize(raw_data.as_slice())?;
                     // Extract raw data and echo it back
                     let echo_msg = Message::new(
                         Command::Write,
                         0, 0, received_msg.data.clone()
                     );
-                    transport_b.send_message(&echo_msg).await
+                    let serialized_echo = echo_msg.serialize();
+                    transport_b.send(&serialized_echo).await
                         .context("Failed to echo data back")?;
                     received_msg.data
                 }
@@ -573,8 +578,11 @@ impl LoopbackTestApp {
         // Side A: Receive echo
         let echo_response = {
             let mut transport_a = self.side_a.transport.lock().await;
-            timeout(OPERATION_TIMEOUT, transport_a.receive_message()).await
+            let raw_data = timeout(OPERATION_TIMEOUT, transport_a.receive()).await
                 .context("Timeout waiting for echo")?
+                .context("Failed to receive echo")?;
+            Message::deserialize(raw_data.as_slice())
+                .context("Failed to deserialize echo message")
                 .context("Failed to receive echo")?
         };
         

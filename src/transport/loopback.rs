@@ -8,15 +8,14 @@ use tokio::time::sleep;
 use tracing::{debug, trace};
 
 use super::{ConnectionStatus, Transport, TransportType};
-use crate::protocol::message::Message;
 
-/// Shared message queues for loopback pair communication
+/// Shared data queues for loopback pair communication
 #[derive(Clone)]
 pub struct LoopbackQueues {
-    /// Messages sent from A to B
-    a_to_b: Arc<Mutex<VecDeque<Message>>>,
-    /// Messages sent from B to A
-    b_to_a: Arc<Mutex<VecDeque<Message>>>,
+    /// Data sent from A to B
+    a_to_b: Arc<Mutex<VecDeque<Vec<u8>>>>,
+    /// Data sent from B to A
+    b_to_a: Arc<Mutex<VecDeque<Vec<u8>>>>,
 }
 
 impl LoopbackQueues {
@@ -37,7 +36,7 @@ pub struct LoopbackTransport {
     device_id: String,
     is_connected: bool,
     /// For single device mode (echo)
-    echo_queue: Arc<Mutex<VecDeque<Message>>>,
+    echo_queue: Arc<Mutex<VecDeque<Vec<u8>>>>,
     /// For pair mode (bidirectional)
     pair_queues: Option<LoopbackQueues>,
     is_device_a: bool, // true for device A, false for device B in pair mode
@@ -144,18 +143,15 @@ impl LoopbackTransport {
 
 #[async_trait]
 impl Transport for LoopbackTransport {
-    async fn send_message(&mut self, message: &Message) -> Result<()> {
+    async fn send(&mut self, data: &[u8]) -> Result<()> {
         if !self.is_connected {
             return Err(anyhow::anyhow!("Loopback transport not connected"));
         }
 
         trace!(
-            "[{}] Sending message: cmd={:?} arg0=0x{:08X} arg1=0x{:08X} data_len={}",
+            "[{}] Sending {} bytes",
             self.device_id,
-            message.command,
-            message.arg0,
-            message.arg1,
-            message.data.len()
+            data.len()
         );
 
         // Simulate network latency
@@ -165,7 +161,7 @@ impl Transport for LoopbackTransport {
 
         // Simulate packet loss
         if self.should_drop_packet() {
-            debug!("[{}] Simulating packet loss - message dropped", self.device_id);
+            debug!("[{}] Simulating packet loss - data dropped", self.device_id);
             return Err(anyhow::anyhow!("Simulated packet loss"));
         }
 
@@ -179,17 +175,17 @@ impl Transport for LoopbackTransport {
                 };
                 
                 let mut queue = target_queue.lock().await;
-                queue.push_back(message.clone());
+                queue.push_back(data.to_vec());
                 
-                debug!("[{}] Message sent to paired device (queue length: {})", 
+                debug!("[{}] Data sent to paired device (queue length: {})", 
                        self.device_id, queue.len());
             }
             None => {
                 // Single device mode: echo behavior
                 let mut queue = self.echo_queue.lock().await;
-                queue.push_back(message.clone());
+                queue.push_back(data.to_vec());
                 
-                debug!("[{}] Message queued for echo (queue length: {})", 
+                debug!("[{}] Data queued for echo (queue length: {})", 
                        self.device_id, queue.len());
             }
         }
@@ -197,7 +193,7 @@ impl Transport for LoopbackTransport {
         Ok(())
     }
 
-    async fn receive_message(&mut self) -> Result<Message> {
+    async fn receive(&mut self) -> Result<Vec<u8>> {
         if !self.is_connected {
             return Err(anyhow::anyhow!("Loopback transport not connected"));
         }
@@ -207,7 +203,7 @@ impl Transport for LoopbackTransport {
             sleep(self.latency).await;
         }
 
-        let message = match &self.pair_queues {
+        let data = match &self.pair_queues {
             Some(queues) => {
                 // Pair mode: receive from the other device
                 let source_queue = if self.is_device_a {
@@ -218,13 +214,13 @@ impl Transport for LoopbackTransport {
                 
                 let mut queue = source_queue.lock().await;
                 match queue.pop_front() {
-                    Some(message) => {
-                        debug!("[{}] Message received from paired device (remaining: {})", 
+                    Some(data) => {
+                        debug!("[{}] Data received from paired device (remaining: {})", 
                                self.device_id, queue.len());
-                        Ok(message)
+                        Ok(data)
                     }
                     None => {
-                        Err(anyhow::anyhow!("No messages available from paired device"))
+                        Err(anyhow::anyhow!("No data available from paired device"))
                     }
                 }
             }
@@ -232,33 +228,30 @@ impl Transport for LoopbackTransport {
                 // Single device mode: echo behavior
                 let mut queue = self.echo_queue.lock().await;
                 match queue.pop_front() {
-                    Some(message) => {
-                        debug!("[{}] Message retrieved from echo queue (remaining: {})", 
+                    Some(data) => {
+                        debug!("[{}] Data retrieved from echo queue (remaining: {})", 
                                self.device_id, queue.len());
-                        Ok(message)
+                        Ok(data)
                     }
                     None => {
-                        Err(anyhow::anyhow!("No messages available in echo queue"))
+                        Err(anyhow::anyhow!("No data available in echo queue"))
                     }
                 }
             }
         };
 
-        match &message {
-            Ok(msg) => {
+        match &data {
+            Ok(bytes) => {
                 trace!(
-                    "[{}] Receiving message: cmd={:?} arg0=0x{:08X} arg1=0x{:08X} data_len={}",
+                    "[{}] Receiving {} bytes",
                     self.device_id,
-                    msg.command,
-                    msg.arg0,
-                    msg.arg1,
-                    msg.data.len()
+                    bytes.len()
                 );
             }
             Err(_) => {}
         }
 
-        message
+        data
     }
 
     async fn connect(&mut self) -> Result<ConnectionStatus> {
@@ -286,7 +279,7 @@ impl Transport for LoopbackTransport {
         debug!("[{}] Disconnecting loopback transport...", self.device_id);
         
         // Clear queues on disconnect
-        let messages_cleared = match &self.pair_queues {
+        let data_cleared = match &self.pair_queues {
             Some(_queues) => {
                 // In pair mode, we don't clear shared queues as the other device might still need them
                 // Only clear if both devices disconnect
@@ -304,8 +297,8 @@ impl Transport for LoopbackTransport {
         
         self.is_connected = false;
         
-        debug!("[{}] Loopback transport disconnected (cleared {} queued messages)", 
-               self.device_id, messages_cleared);
+        debug!("[{}] Loopback transport disconnected (cleared {} queued items)", 
+               self.device_id, data_cleared);
         
         Ok(())
     }
@@ -328,7 +321,7 @@ impl Transport for LoopbackTransport {
         }
 
         // Check queue sizes
-        let (queue_size, mode_desc) = match &self.pair_queues {
+        let (_queue_size, mode_desc) = match &self.pair_queues {
             Some(queues) => {
                 let a_to_b_size = queues.a_to_b.lock().await.len();
                 let b_to_a_size = queues.b_to_a.lock().await.len();
@@ -376,7 +369,6 @@ impl Transport for LoopbackTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::message::{Command, Message};
 
     #[tokio::test]
     async fn test_loopback_basic() {
@@ -387,21 +379,13 @@ mod tests {
         assert_eq!(status, ConnectionStatus::Ready);
         assert!(transport.is_connected().await);
         
-        // Test message echo
-        let original_message = Message {
-            command: Command::Ping,
-            arg0: 0x12345678,
-            arg1: 0x87654321,
-            data: b"Hello, World!".to_vec().into(),
-        };
+        // Test data echo
+        let original_data = b"Hello, World!".to_vec();
         
-        transport.send_message(&original_message).await.unwrap();
-        let received_message = transport.receive_message().await.unwrap();
+        transport.send(&original_data).await.unwrap();
+        let received_data = transport.receive().await.unwrap();
         
-        assert_eq!(original_message.command, received_message.command);
-        assert_eq!(original_message.arg0, received_message.arg0);
-        assert_eq!(original_message.arg1, received_message.arg1);
-        assert_eq!(original_message.data, received_message.data);
+        assert_eq!(original_data, received_data);
         
         // Test health check
         transport.health_check().await.unwrap();
@@ -416,26 +400,20 @@ mod tests {
         let mut transport = LoopbackTransport::new("test_queue".to_string());
         transport.connect().await.unwrap();
         
-        // Send multiple messages
+        // Send multiple data packets
         for i in 0..5 {
-            let message = Message {
-                command: Command::Ping,
-                arg0: i,
-                arg1: 0,
-                data: vec![i as u8; 10].into(),
-            };
-            transport.send_message(&message).await.unwrap();
+            let data = vec![i as u8; 10];
+            transport.send(&data).await.unwrap();
         }
         
         // Receive them in order
         for i in 0..5 {
-            let received = transport.receive_message().await.unwrap();
-            assert_eq!(received.arg0, i);
-            assert_eq!(received.data, vec![i as u8; 10]);
+            let received = transport.receive().await.unwrap();
+            assert_eq!(received, vec![i as u8; 10]);
         }
         
         // Queue should be empty now
-        assert!(transport.receive_message().await.is_err());
+        assert!(transport.receive().await.is_err());
     }
 
     #[tokio::test]
@@ -444,19 +422,14 @@ mod tests {
         let mut transport = LoopbackTransport::with_latency("test_latency".to_string(), latency);
         transport.connect().await.unwrap();
         
-        let message = Message {
-            command: Command::Ping,
-            arg0: 1,
-            arg1: 2,
-            data: b"test".to_vec().into(),
-        };
+        let data = b"test".to_vec();
         
         let start = std::time::Instant::now();
-        transport.send_message(&message).await.unwrap();
+        transport.send(&data).await.unwrap();
         let send_duration = start.elapsed();
         
         let start = std::time::Instant::now();
-        transport.receive_message().await.unwrap();
+        transport.receive().await.unwrap();
         let recv_duration = start.elapsed();
         
         // Each operation should take at least the configured latency
@@ -476,36 +449,20 @@ mod tests {
         device_b.connect().await.unwrap();
         
         // Test A → B communication
-        let message_a_to_b = Message {
-            command: Command::Write,
-            arg0: 0xAAAA,
-            arg1: 0xBBBB,
-            data: b"Message from A to B".to_vec().into(),
-        };
+        let data_a_to_b = b"Message from A to B".to_vec();
         
-        device_a.send_message(&message_a_to_b).await.unwrap();
-        let received_by_b = device_b.receive_message().await.unwrap();
+        device_a.send(&data_a_to_b).await.unwrap();
+        let received_by_b = device_b.receive().await.unwrap();
         
-        assert_eq!(message_a_to_b.command, received_by_b.command);
-        assert_eq!(message_a_to_b.arg0, received_by_b.arg0);
-        assert_eq!(message_a_to_b.arg1, received_by_b.arg1);
-        assert_eq!(message_a_to_b.data, received_by_b.data);
+        assert_eq!(data_a_to_b, received_by_b);
         
         // Test B → A communication
-        let message_b_to_a = Message {
-            command: Command::Okay,
-            arg0: 0xCCCC,
-            arg1: 0xDDDD,
-            data: b"Reply from B to A".to_vec().into(),
-        };
+        let data_b_to_a = b"Reply from B to A".to_vec();
         
-        device_b.send_message(&message_b_to_a).await.unwrap();
-        let received_by_a = device_a.receive_message().await.unwrap();
+        device_b.send(&data_b_to_a).await.unwrap();
+        let received_by_a = device_a.receive().await.unwrap();
         
-        assert_eq!(message_b_to_a.command, received_by_a.command);
-        assert_eq!(message_b_to_a.arg0, received_by_a.arg0);
-        assert_eq!(message_b_to_a.arg1, received_by_a.arg1);
-        assert_eq!(message_b_to_a.data, received_by_a.data);
+        assert_eq!(data_b_to_a, received_by_a);
         
         // Test health checks
         device_a.health_check().await.unwrap();
@@ -529,47 +486,33 @@ mod tests {
         device_a.connect().await.unwrap();
         device_b.connect().await.unwrap();
         
-        // Send multiple messages A → B
+        // Send multiple data A → B
         for i in 0..3 {
-            let message = Message {
-                command: Command::Write,
-                arg0: i,
-                arg1: i * 10,
-                data: format!("Message {} from A", i).as_bytes().to_vec().into(),
-            };
-            device_a.send_message(&message).await.unwrap();
+            let data = format!("Message {} from A", i).as_bytes().to_vec();
+            device_a.send(&data).await.unwrap();
         }
         
-        // Send multiple messages B → A
+        // Send multiple data B → A
         for i in 10..13 {
-            let message = Message {
-                command: Command::Write,
-                arg0: i,
-                arg1: i * 10,
-                data: format!("Message {} from B", i).as_bytes().to_vec().into(),
-            };
-            device_b.send_message(&message).await.unwrap();
+            let data = format!("Message {} from B", i).as_bytes().to_vec();
+            device_b.send(&data).await.unwrap();
         }
         
-        // Receive messages in B (from A)
+        // Receive data in B (from A)
         for i in 0..3 {
-            let received = device_b.receive_message().await.unwrap();
-            assert_eq!(received.arg0, i);
-            assert_eq!(received.arg1, i * 10);
-            assert_eq!(received.data, format!("Message {} from A", i).as_bytes());
+            let received = device_b.receive().await.unwrap();
+            assert_eq!(received, format!("Message {} from A", i).as_bytes());
         }
         
-        // Receive messages in A (from B)
+        // Receive data in A (from B)
         for i in 10..13 {
-            let received = device_a.receive_message().await.unwrap();
-            assert_eq!(received.arg0, i);
-            assert_eq!(received.arg1, i * 10);
-            assert_eq!(received.data, format!("Message {} from B", i).as_bytes());
+            let received = device_a.receive().await.unwrap();
+            assert_eq!(received, format!("Message {} from B", i).as_bytes());
         }
         
         // Both queues should be empty now
-        assert!(device_a.receive_message().await.is_err());
-        assert!(device_b.receive_message().await.is_err());
+        assert!(device_a.receive().await.is_err());
+        assert!(device_b.receive().await.is_err());
     }
 
     #[tokio::test]
@@ -584,19 +527,14 @@ mod tests {
         device_a.connect().await.unwrap();
         device_b.connect().await.unwrap();
         
-        let message = Message {
-            command: Command::Ping,
-            arg0: 0x1234,
-            arg1: 0x5678,
-            data: b"Latency test".to_vec().into(),
-        };
+        let data = b"Latency test".to_vec();
         
         let start = std::time::Instant::now();
-        device_a.send_message(&message).await.unwrap();
+        device_a.send(&data).await.unwrap();
         let send_duration = start.elapsed();
         
         let start = std::time::Instant::now();
-        device_b.receive_message().await.unwrap();
+        device_b.receive().await.unwrap();
         let recv_duration = start.elapsed();
         
         // Each operation should take at least the configured latency
