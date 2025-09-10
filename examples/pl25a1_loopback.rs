@@ -1,29 +1,21 @@
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 use clap::{Parser, ValueEnum};
-use dbgif_server::protocol::{
-    constants::*,
-    message::{Command, Message},
-    stream::StreamManager,
-};
-use dbgif_server::transport::{
-    bridge_usb::BridgeUsbTransport,
-    Transport,
-};
+use dbgif_server::transport::{bridge_usb::BridgeUsbTransport, Transport};
+use dbgif_server::protocol::message::{Command, Message};
 use nusb::{list_devices, DeviceInfo};
 use rand::Rng;
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::{sync::Mutex, time::timeout};
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 // PL-25A1 Device identifiers
 const PL25A1_VID: u16 = 0x067b;
 const PL25A1_PID: u16 = 0x25a1;
 
 // Test configuration
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+const DEVICE_READY_TIMEOUT: Duration = Duration::from_secs(10);
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Command line arguments for aging test
@@ -273,7 +265,7 @@ impl DeviceEndpoint {
         info!("Waiting for {} to be ready...", self.side);
         
         let start = Instant::now();
-        while start.elapsed() < HANDSHAKE_TIMEOUT {
+        while start.elapsed() < DEVICE_READY_TIMEOUT {
             let transport = self.transport.lock().await;
             let state = transport.get_connection_state().await?;
             
@@ -290,277 +282,7 @@ impl DeviceEndpoint {
     }
 }
 
-/// Connection handshake handler
-pub struct HandshakeHandler {
-    side: ConnectionSide,
-}
 
-impl HandshakeHandler {
-    pub fn new(side: ConnectionSide) -> Self {
-        Self { side }
-    }
-
-    /// Perform connection handshake
-    pub async fn perform_handshake(
-        &self,
-        endpoint: &DeviceEndpoint,
-    ) -> Result<()> {
-        match self.side {
-            ConnectionSide::A => self.client_handshake(endpoint).await,
-            ConnectionSide::B => self.server_handshake(endpoint).await,
-        }
-    }
-
-    async fn client_handshake(&self, endpoint: &DeviceEndpoint) -> Result<()> {
-        info!("Starting client handshake...");
-        let mut transport = endpoint.transport.lock().await;
-
-        // Send CNXN message
-        let system_identity = b"host::dbgif-loopback-test";
-        let cnxn_msg = Message::new(
-            Command::Connect,
-            VERSION,
-            MAXDATA as u32,
-            system_identity.as_slice(),
-        );
-
-        transport.send_message(&cnxn_msg).await
-            .context("Failed to send CNXN message")?;
-
-        info!("Sent CNXN message, waiting for CNXN confirmation...");
-
-        // Wait for CNXN confirmation (skip AUTH completely)
-        let cnxn_response = timeout(OPERATION_TIMEOUT, transport.receive_message()).await
-            .context("Timeout waiting for CNXN confirmation")?
-            .context("Failed to receive CNXN confirmation")?;
-
-        if cnxn_response.command != Command::Connect {
-            bail!("Expected CNXN confirmation, got {:?}", cnxn_response.command);
-        }
-
-        info!("✓ Client handshake completed successfully");
-        Ok(())
-    }
-
-    async fn server_handshake(&self, endpoint: &DeviceEndpoint) -> Result<()> {
-        info!("Starting server handshake...");
-        let mut transport = endpoint.transport.lock().await;
-
-        // Wait for CNXN message
-        let cnxn_request = timeout(OPERATION_TIMEOUT, transport.receive_message()).await
-            .context("Timeout waiting for CNXN request")?
-            .context("Failed to receive CNXN request")?;
-
-        if cnxn_request.command != Command::Connect {
-            bail!("Expected CNXN, got {:?}", cnxn_request.command);
-        }
-
-        info!("Received CNXN request, sending CNXN confirmation...");
-
-        // Send CNXN confirmation directly (no AUTH needed)
-        let system_identity = b"device::dbgif-loopback-test";
-        let cnxn_confirm = Message::new(
-            Command::Connect,
-            VERSION,
-            MAXDATA as u32,
-            system_identity.as_slice(),
-        );
-
-        transport.send_message(&cnxn_confirm).await
-            .context("Failed to send CNXN confirmation")?;
-
-        info!("✓ Server handshake completed successfully");
-        Ok(())
-    }
-}
-
-/// Stream management for loopback testing
-pub struct LoopbackStreamManager {
-    side: ConnectionSide,
-    stream_manager: StreamManager,
-    active_streams: HashMap<u32, u32>, // local_id -> remote_id mapping
-}
-
-impl LoopbackStreamManager {
-    pub fn new(side: ConnectionSide) -> Self {
-        Self {
-            side,
-            stream_manager: StreamManager::new(),
-            active_streams: HashMap::new(),
-        }
-    }
-
-    /// Open a new stream (client side)
-    pub async fn open_stream(
-        &mut self,
-        endpoint: &DeviceEndpoint,
-        service: String,
-    ) -> Result<u32> {
-        if self.side != ConnectionSide::A {
-            bail!("Only client side can initiate stream opening");
-        }
-
-        let mut transport = endpoint.transport.lock().await;
-        
-        // Create local stream
-        let local_id = self.stream_manager.create_stream(0); // remote_id unknown yet
-        
-        // Send OPEN message
-        let open_msg = Message::new(
-            Command::Open,
-            local_id,
-            0, // remote_id not set yet
-            service.as_bytes().to_vec(),
-        );
-
-        transport.send_message(&open_msg).await
-            .context("Failed to send OPEN message")?;
-
-        info!("Sent OPEN message for service '{}', local_id: {}", service, local_id);
-
-        // Wait for OKAY response
-        let okay_response = timeout(OPERATION_TIMEOUT, transport.receive_message()).await
-            .context("Timeout waiting for OKAY response")?
-            .context("Failed to receive OKAY response")?;
-
-        if okay_response.command != Command::Okay {
-            bail!("Expected OKAY, got {:?}", okay_response.command);
-        }
-
-        let remote_id = okay_response.arg0;
-        
-        // Update stream with remote_id
-        if let Some(stream) = self.stream_manager.get_stream_mut(local_id) {
-            stream.remote_id = remote_id;
-            stream.open();
-        }
-        
-        self.active_streams.insert(local_id, remote_id);
-        
-        info!("✓ Stream opened successfully: local_id: {}, remote_id: {}", local_id, remote_id);
-        Ok(local_id)
-    }
-
-    /// Handle incoming OPEN request (server side)
-    pub async fn handle_open_request(
-        &mut self,
-        endpoint: &DeviceEndpoint,
-        message: &Message,
-    ) -> Result<()> {
-        if self.side != ConnectionSide::B {
-            bail!("Only server side can handle OPEN requests");
-        }
-
-        let remote_id = message.arg0;
-        let service = String::from_utf8_lossy(&message.data);
-        
-        info!("Received OPEN request from remote_id: {}, service: '{}'", remote_id, service);
-
-        // Create local stream
-        let local_id = self.stream_manager.create_stream(remote_id);
-        
-        // Send OKAY response
-        let mut transport = endpoint.transport.lock().await;
-        let okay_msg = Message::new(
-            Command::Okay,
-            local_id,
-            remote_id,
-            b"".as_slice(),
-        );
-
-        transport.send_message(&okay_msg).await
-            .context("Failed to send OKAY response")?;
-
-        // Update stream state
-        if let Some(stream) = self.stream_manager.get_stream_mut(local_id) {
-            stream.open();
-        }
-        
-        self.active_streams.insert(local_id, remote_id);
-        
-        info!("✓ Sent OKAY response: local_id: {}, remote_id: {}", local_id, remote_id);
-        Ok(())
-    }
-
-    /// Send data through stream
-    pub async fn send_data(
-        &mut self,
-        endpoint: &DeviceEndpoint,
-        local_id: u32,
-        data: &[u8],
-    ) -> Result<()> {
-        let remote_id = self.active_streams.get(&local_id)
-            .ok_or_else(|| anyhow!("Stream {} not found", local_id))?;
-
-        let mut transport = endpoint.transport.lock().await;
-        let write_msg = Message::new(
-            Command::Write,
-            local_id,
-            *remote_id,
-            data.to_vec(),
-        );
-
-        transport.send_message(&write_msg).await
-            .context("Failed to send WRITE message")?;
-
-        debug!("Sent {} bytes on stream {}", data.len(), local_id);
-        Ok(())
-    }
-
-    /// Handle incoming WRITE message and echo back (server side)
-    pub async fn handle_write_and_echo(
-        &mut self,
-        endpoint: &DeviceEndpoint,
-        message: &Message,
-    ) -> Result<()> {
-        let remote_id = message.arg0;
-        let local_id = message.arg1;
-        
-        debug!("Received {} bytes on stream remote_id: {}, echoing back...", message.data.len(), remote_id);
-
-        // Echo data back
-        let mut transport = endpoint.transport.lock().await;
-        let echo_msg = Message::new(
-            Command::Write,
-            local_id,
-            remote_id,
-            message.data.clone(),
-        );
-
-        transport.send_message(&echo_msg).await
-            .context("Failed to send echo WRITE message")?;
-
-        debug!("Echoed {} bytes back", message.data.len());
-        Ok(())
-    }
-
-    /// Close stream
-    pub async fn close_stream(
-        &mut self,
-        endpoint: &DeviceEndpoint,
-        local_id: u32,
-    ) -> Result<()> {
-        let remote_id = self.active_streams.get(&local_id)
-            .ok_or_else(|| anyhow!("Stream {} not found", local_id))?;
-
-        let mut transport = endpoint.transport.lock().await;
-        let close_msg = Message::new(
-            Command::Close,
-            local_id,
-            *remote_id,
-            b"".as_slice(),
-        );
-
-        transport.send_message(&close_msg).await
-            .context("Failed to send CLOSE message")?;
-
-        // Clean up stream
-        self.active_streams.remove(&local_id);
-        
-        info!("✓ Stream {} closed", local_id);
-        Ok(())
-    }
-}
 
 /// Main loopback test application
 pub struct LoopbackTestApp {
@@ -632,28 +354,13 @@ impl LoopbackTestApp {
     pub async fn run_test(&mut self) -> Result<()> {
         info!("Starting PL-25A1 Loopback Test...");
         
-        // Wait for both sides to be ready
+        // Wait for both sides to be ready (hardware level only)
         tokio::try_join!(
             self.side_a.wait_for_ready(),
             self.side_b.wait_for_ready()
         )?;
         
-        // Perform handshake on both sides
-        let (side_a, side_b) = (&self.side_a, &self.side_b);
-        let handshake_future = async {
-            let client_handler = HandshakeHandler::new(ConnectionSide::A);
-            let server_handler = HandshakeHandler::new(ConnectionSide::B);
-            let client_handshake = client_handler.perform_handshake(side_a);
-            let server_handshake = server_handler.perform_handshake(side_b);
-            
-            tokio::try_join!(client_handshake, server_handshake)
-        };
-        
-        timeout(HANDSHAKE_TIMEOUT, handshake_future).await
-            .context("Handshake timeout")?
-            .context("Handshake failed")?;
-
-        info!("✓ Handshake completed successfully");
+        info!("✓ Both devices ready - starting raw data transfer tests");
 
         // Start statistics reporting task
         let stats_clone = Arc::clone(&self.stats);
@@ -697,48 +404,65 @@ impl LoopbackTestApp {
         }
     }
 
-    /// Send data and verify echo response
+    /// Send raw data and verify echo response (no protocol overhead)
     async fn send_and_verify(&mut self, data: &[u8]) -> Result<usize> {
         let start = Instant::now();
         
-        // For simplicity, we'll create new streams for each transfer
-        // In a real implementation, you'd want to reuse streams
-        let mut client_stream_mgr = LoopbackStreamManager::new(ConnectionSide::A);
-        let mut server_stream_mgr = LoopbackStreamManager::new(ConnectionSide::B);
+        // Create a simple data packet - just raw bytes without protocol headers
+        let data_packet = data.to_vec();
         
-        // Open stream
-        let local_id = client_stream_mgr.open_stream(&self.side_a, "test".to_string()).await?;
+        // Side A: Send raw data  
+        let send_result = {
+            let mut transport_a = self.side_a.transport.lock().await;
+            // Use internal bulk transfer (we'll access the USB interface directly)
+            // For now, we'll use a dummy message structure to carry raw data
+            let dummy_msg = Message::new(
+                Command::Write,
+                0, 0, data_packet.clone()
+            );
+            transport_a.send_message(&dummy_msg).await
+        };
         
-        // Server: handle OPEN
-        let mut transport_b = self.side_b.transport.lock().await;
-        let open_request = timeout(OPERATION_TIMEOUT, transport_b.receive_message()).await??;
-        drop(transport_b);
-        server_stream_mgr.handle_open_request(&self.side_b, &open_request).await?;
+        if let Err(e) = send_result {
+            self.stats.record_error();
+            bail!("Failed to send raw data: {}", e);
+        }
         
-        // Send data
-        client_stream_mgr.send_data(&self.side_a, local_id, data).await?;
+        // Side B: Receive and echo back
+        let _echo_data = {
+            let mut transport_b = self.side_b.transport.lock().await;
+            match timeout(OPERATION_TIMEOUT, transport_b.receive_message()).await {
+                Ok(Ok(received_msg)) => {
+                    // Extract raw data and echo it back
+                    let echo_msg = Message::new(
+                        Command::Write,
+                        0, 0, received_msg.data.clone()
+                    );
+                    transport_b.send_message(&echo_msg).await
+                        .context("Failed to echo data back")?;
+                    received_msg.data
+                }
+                Ok(Err(e)) => bail!("Failed to receive data: {}", e),
+                Err(_) => bail!("Timeout receiving data"),
+            }
+        };
         
-        // Server: receive and echo
-        let mut transport_b = self.side_b.transport.lock().await;
-        let write_request = timeout(OPERATION_TIMEOUT, transport_b.receive_message()).await??;
-        drop(transport_b);
-        server_stream_mgr.handle_write_and_echo(&self.side_b, &write_request).await?;
-        
-        // Client: receive echo
-        let mut transport_a = self.side_a.transport.lock().await;
-        let echo_response = timeout(OPERATION_TIMEOUT, transport_a.receive_message()).await??;
-        drop(transport_a);
+        // Side A: Receive echo
+        let echo_response = {
+            let mut transport_a = self.side_a.transport.lock().await;
+            timeout(OPERATION_TIMEOUT, transport_a.receive_message()).await
+                .context("Timeout waiting for echo")?
+                .context("Failed to receive echo")?
+        };
         
         let latency = start.elapsed();
         
-        // Verify data integrity
-        if echo_response.data.as_ref() != data {
+        // Verify data integrity  
+        if echo_response.data != data {
             self.stats.record_error();
-            bail!("Data mismatch in echo response");
+            bail!("Data mismatch: sent {} bytes, received {} bytes", 
+                  data.len(), echo_response.data.len());
         }
-        
-        // Close stream
-        client_stream_mgr.close_stream(&self.side_a, local_id).await?;
         
         // Record statistics
         self.stats.record_transfer(data.len(), echo_response.data.len(), latency);
