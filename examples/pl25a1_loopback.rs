@@ -525,28 +525,62 @@ impl LoopbackTestApp {
         }
     }
 
-    /// Send raw data and verify echo response (maximum speed, no overhead)
+    /// Send raw data and verify echo response (maximum speed, concurrent tasks)
     async fn send_and_verify(&mut self, data: &[u8]) -> Result<usize> {
         let start = Instant::now();
+        let data_len = data.len();
+        let data_clone = data.to_vec();
         
-        // Side A: Send raw data directly (no error checking for speed)
-        {
-            let mut transport_a = self.side_a.transport.lock().await;
-            transport_a.send(data).await?;
-        }
+        // Task 1: Side B RX (start first to be ready for incoming data)
+        let side_b_transport_rx = Arc::clone(&self.side_b.transport);
+        let rx_task = tokio::spawn(async move {
+            let mut transport = side_b_transport_rx.lock().await;
+            transport.receive(data_len + 1024).await
+        });
         
-        // Side B: Receive and echo back (minimal overhead)
-        {
-            let mut transport_b = self.side_b.transport.lock().await;
-            let raw_data = transport_b.receive(data.len() + 1024).await?;
-            transport_b.send(&raw_data).await?;
-        }
+        // Small delay to ensure RX is ready
+        tokio::time::sleep(Duration::from_millis(1)).await;
         
-        // Side A: Receive echo (minimal overhead)
-        let echo_response = {
-            let mut transport_a = self.side_a.transport.lock().await;
-            transport_a.receive(data.len() + 1024).await?
-        };
+        // Task 2: Side A TX (send data)
+        let side_a_transport_tx = Arc::clone(&self.side_a.transport);
+        let data_for_tx = data_clone.clone();
+        let tx_task = tokio::spawn(async move {
+            let mut transport = side_a_transport_tx.lock().await;
+            transport.send(&data_for_tx).await
+        });
+        
+        // Wait for RX to complete, then start echo
+        let received_data = rx_task.await
+            .context("RX task failed")?
+            .context("Failed to receive data")?;
+        
+        // Task 3: Side B TX (echo back)
+        let side_b_transport_tx = Arc::clone(&self.side_b.transport);
+        let echo_task = tokio::spawn(async move {
+            let mut transport = side_b_transport_tx.lock().await;
+            transport.send(&received_data).await
+        });
+        
+        // Task 4: Side A RX (receive echo)
+        let side_a_transport_rx = Arc::clone(&self.side_a.transport);
+        let final_rx_task = tokio::spawn(async move {
+            let mut transport = side_a_transport_rx.lock().await;
+            transport.receive(data_len + 1024).await
+        });
+        
+        // Wait for all tasks to complete
+        let (tx_result, echo_result, echo_response_result) = tokio::join!(
+            tx_task,
+            echo_task,
+            final_rx_task
+        );
+        
+        // Check results
+        tx_result.context("TX task failed")?.context("Failed to send data")?;
+        echo_result.context("Echo task failed")?.context("Failed to echo data")?;
+        let echo_response = echo_response_result
+            .context("Final RX task failed")?
+            .context("Failed to receive echo")?;
         
         let latency = start.elapsed();
         
