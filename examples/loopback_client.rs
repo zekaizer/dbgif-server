@@ -52,6 +52,10 @@ struct Args {
     /// Test pattern
     #[arg(long, default_value = "echo")]
     pattern: TestPattern,
+
+    /// Enable bridge loopback test mode (requires both device A and B)
+    #[arg(long)]
+    bridge: bool,
 }
 
 /// Available test patterns
@@ -498,6 +502,98 @@ impl LoopbackTest {
         Ok(())
     }
 
+    /// Run bridge loopback test between two transports
+    pub async fn run_bridge_loopback(&mut self, device_a: &str, device_b: &str, config: &TestConfig) -> Result<()> {
+        info!("Starting bridge loopback test: {} <-> {}", device_a, device_b);
+        
+        // Create separate connections for each transport
+        let client_a = DbgifClient::new(self.client.server_addr.clone());
+        let client_b = DbgifClient::new(self.client.server_addr.clone());
+        
+        // Create separate statistics for each direction
+        let stats_a_to_b = Arc::new(TestStats::new(config.csv_output));
+        let stats_b_to_a = Arc::new(TestStats::new(config.csv_output));
+        
+        if config.csv_output {
+            println!("direction,timestamp_ms,bytes,latency_us,success");
+        }
+
+        // Start statistics reporting
+        let stats_a_clone = Arc::clone(&stats_a_to_b);
+        let stats_b_clone = Arc::clone(&stats_b_to_a);
+        let stats_task = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(5));
+            loop {
+                interval.tick().await;
+                info!("=== A->B Bridge Stats ===");
+                stats_a_clone.print_stats();
+                info!("=== B->A Bridge Stats ===");
+                stats_b_clone.print_stats();
+            }
+        });
+
+        let test_duration = if config.duration > 0 {
+            Duration::from_secs(config.duration)
+        } else {
+            Duration::from_secs(u64::MAX)
+        };
+
+        // Create bridge test tasks
+        let config_a = TestConfig {
+            duration: config.duration,
+            size: config.size,
+            delay: config.delay,
+            pattern: config.pattern.clone(),
+            csv_output: config.csv_output,
+        };
+        let config_b = TestConfig {
+            duration: config.duration,
+            size: config.size,
+            delay: config.delay,
+            pattern: config.pattern.clone(),
+            csv_output: config.csv_output,
+        };
+
+        let device_a_str = device_a.to_string();
+        let device_b_str = device_b.to_string();
+        let stats_a = Arc::clone(&stats_a_to_b);
+        let stats_b = Arc::clone(&stats_b_to_a);
+
+        // Task A: Send from device A, receive on device B
+        let task_a_to_b = tokio::spawn(async move {
+            if let Err(e) = Self::run_bridge_sender(&client_a, &device_a_str, &config_a, stats_a, "A->B").await {
+                error!("A->B bridge test failed: {}", e);
+            }
+        });
+
+        // Task B: Send from device B, receive on device A
+        let task_b_to_a = tokio::spawn(async move {
+            // Wait a bit to let A->B task start first
+            tokio::time::sleep(Duration::from_millis(1000)).await;
+            if let Err(e) = Self::run_bridge_sender(&client_b, &device_b_str, &config_b, stats_b, "B->A").await {
+                error!("B->A bridge test failed: {}", e);
+            }
+        });
+
+        // Wait for test duration
+        tokio::time::sleep(test_duration).await;
+        info!("Bridge test duration reached, stopping...");
+
+        // Cancel all tasks
+        task_a_to_b.abort();
+        task_b_to_a.abort();
+        stats_task.abort();
+
+        // Print final summary
+        info!("=== BRIDGE LOOPBACK TEST SUMMARY ===");
+        info!("=== A->B Direction ===");
+        stats_a_to_b.print_summary();
+        info!("=== B->A Direction ===");
+        stats_b_to_a.print_summary();
+
+        Ok(())
+    }
+
     /// Run bidirectional test between device A and device B
     pub async fn run_bidirectional(&mut self, device_a: &str, device_b: &str, config: &TestConfig) -> Result<()> {
         info!("Starting bidirectional test: {} (client) <-> {} (server)", device_a, device_b);
@@ -586,6 +682,131 @@ impl LoopbackTest {
         info!("=== B->A Direction ===");
         stats_b_to_a.print_summary();
 
+        Ok(())
+    }
+
+    /// Run bridge sender (sends data and receives from other transport)
+    async fn run_bridge_sender(
+        client: &DbgifClient,
+        device: &str,
+        config: &TestConfig,
+        stats: Arc<TestStats>,
+        direction: &str,
+    ) -> Result<()> {
+        info!("Starting {} bridge sender for device: {}", direction, device);
+        
+        let mut stream = client.select_device(device).await?;
+        let start = Instant::now();
+        let test_duration = if config.duration > 0 {
+            Duration::from_secs(config.duration)
+        } else {
+            Duration::from_secs(u64::MAX)
+        };
+
+        // Open bridge stream
+        let local_id = 2;
+        let bridge_service = b"bridge:loopback".to_vec();
+        let open_msg = Message::new(Command::Open, local_id, 0, bridge_service);
+        
+        Self::send_message_static(client, &mut stream, &open_msg).await?;
+        
+        // Wait for OKAY response
+        let okay_response = Self::receive_message_static(client, &mut stream).await?;
+        if okay_response.command != Command::Okay {
+            bail!("{} - Expected OKAY for bridge open, got {:?}", direction, okay_response.command);
+        }
+        
+        let remote_id = okay_response.arg0;
+        info!("{} - Bridge stream opened: local={}, remote={}", direction, local_id, remote_id);
+
+        // Start concurrent send and receive tasks
+        let send_stats = Arc::clone(&stats);
+        let receive_stats = Arc::clone(&stats);
+        
+        // Clone stream for concurrent access - we'll need to manage this carefully
+        // For now, we'll alternate between send and receive
+        
+        while start.elapsed() < test_duration {
+            // Send phase
+            let test_data = Self::generate_test_data_static(config.size, &config.pattern);
+            let request_start = Instant::now();
+            
+            let write_msg = Message::new(Command::Write, local_id, remote_id, test_data.clone());
+            if let Err(e) = Self::send_message_static(client, &mut stream, &write_msg).await {
+                warn!("{} - Failed to send bridge data: {}", direction, e);
+                stats.record_error();
+                if config.delay > 0 {
+                    tokio::time::sleep(Duration::from_millis(config.delay)).await;
+                }
+                continue;
+            }
+            
+            // Wait for OKAY acknowledgment
+            match Self::receive_message_static(client, &mut stream).await {
+                Ok(ack) => {
+                    if ack.command != Command::Okay {
+                        warn!("{} - Expected OKAY for bridge write, got {:?}", direction, ack.command);
+                        stats.record_error();
+                        if config.delay > 0 {
+                            tokio::time::sleep(Duration::from_millis(config.delay)).await;
+                        }
+                        continue;
+                    }
+                }
+                Err(e) => {
+                    warn!("{} - Failed to receive bridge write ACK: {}", direction, e);
+                    stats.record_error();
+                    if config.delay > 0 {
+                        tokio::time::sleep(Duration::from_millis(config.delay)).await;
+                    }
+                    continue;
+                }
+            }
+            
+            // Record successful send
+            let send_latency = request_start.elapsed();
+            stats.record_success(config.size, send_latency);
+            
+            if config.csv_output {
+                let timestamp_ms = start.elapsed().as_millis();
+                println!("{},{},{},{},true", direction, timestamp_ms, config.size, send_latency.as_micros());
+            }
+            
+            // Try to receive data from the other transport (non-blocking)
+            // We'll use a short timeout to avoid blocking the send loop
+            match tokio::time::timeout(Duration::from_millis(100), Self::receive_message_static(client, &mut stream)).await {
+                Ok(Ok(recv_msg)) => {
+                    if recv_msg.command == Command::Write {
+                        // Send OKAY acknowledgment
+                        let ack_msg = Message::new(Command::Okay, recv_msg.arg1, recv_msg.arg0, Vec::new());
+                        let _ = Self::send_message_static(client, &mut stream, &ack_msg).await;
+                        
+                        info!("{} - Received bridge data: {} bytes", direction, recv_msg.data.len());
+                        
+                        if config.csv_output {
+                            let timestamp_ms = start.elapsed().as_millis();
+                            println!("{}_recv,{},{},0,true", direction, timestamp_ms, recv_msg.data.len());
+                        }
+                    }
+                }
+                Ok(Err(e)) => {
+                    debug!("{} - Error receiving bridge data: {}", direction, e);
+                }
+                Err(_) => {
+                    // Timeout is expected, just continue
+                }
+            }
+
+            if config.delay > 0 {
+                tokio::time::sleep(Duration::from_millis(config.delay)).await;
+            }
+        }
+
+        // Close the bridge stream
+        let close_msg = Message::new(Command::Close, local_id, remote_id, Vec::new());
+        let _ = Self::send_message_static(client, &mut stream, &close_msg).await;
+        
+        info!("{} bridge sender completed", direction);
         Ok(())
     }
 
@@ -896,6 +1117,11 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Validate bridge mode requirements
+    if args.bridge && (args.device_a.is_none() || args.device_b.is_none()) {
+        bail!("Bridge loopback test requires both --device-a and --device-b to be specified");
+    }
+
     // Determine test devices
     let devices = client.list_devices().await?;
     if devices.is_empty() {
@@ -922,20 +1148,37 @@ async fn main() -> Result<()> {
         let _ = tx.send(()).await;
     });
 
-    // Check if both device A and B are specified for bidirectional test
+    // Check if both device A and B are specified
     if let (Some(device_a), Some(device_b)) = (&args.device_a, &args.device_b) {
-        info!("Running bidirectional test: {} <-> {}", device_a, device_b);
-        
-        // Run bidirectional test with cancellation support
-        tokio::select! {
-            result = loopback_test.run_bidirectional(device_a, device_b, &config) => {
-                match result {
-                    Ok(_) => info!("✓ Bidirectional loopback test completed successfully"),
-                    Err(e) => error!("✗ Bidirectional loopback test failed: {}", e),
+        if args.bridge {
+            info!("Running bridge loopback test: {} <-> {}", device_a, device_b);
+            
+            // Run bridge loopback test with cancellation support
+            tokio::select! {
+                result = loopback_test.run_bridge_loopback(device_a, device_b, &config) => {
+                    match result {
+                        Ok(_) => info!("✓ Bridge loopback test completed successfully"),
+                        Err(e) => error!("✗ Bridge loopback test failed: {}", e),
+                    }
+                }
+                _ = rx.recv() => {
+                    info!("Test interrupted by user");
                 }
             }
-            _ = rx.recv() => {
-                info!("Test interrupted by user");
+        } else {
+            info!("Running bidirectional test: {} <-> {}", device_a, device_b);
+            
+            // Run bidirectional test with cancellation support
+            tokio::select! {
+                result = loopback_test.run_bidirectional(device_a, device_b, &config) => {
+                    match result {
+                        Ok(_) => info!("✓ Bidirectional loopback test completed successfully"),
+                        Err(e) => error!("✗ Bidirectional loopback test failed: {}", e),
+                    }
+                }
+                _ = rx.recv() => {
+                    info!("Test interrupted by user");
+                }
             }
         }
     } else {
