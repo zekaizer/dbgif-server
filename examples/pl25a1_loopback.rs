@@ -548,8 +548,47 @@ impl LoopbackTestApp {
             info!("Side B: RX loop completed - {} transfers, {} bytes", local_count, local_bytes);
         });
         
-        // Wait for both tasks to complete
-        let (tx_result, rx_result) = tokio::join!(tx_task, rx_task);
+        // Task 3: Real-time statistics reporting
+        let stats_tx_count = Arc::clone(&tx_count);
+        let stats_rx_count = Arc::clone(&rx_count);
+        let stats_tx_bytes = Arc::clone(&tx_bytes);
+        let stats_rx_bytes = Arc::clone(&rx_bytes);
+        let stats_task = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(2));
+            interval.tick().await; // Skip first immediate tick
+            
+            while start_time.elapsed() < test_duration {
+                interval.tick().await;
+                
+                let current_tx_count = stats_tx_count.load(Ordering::Relaxed);
+                let current_rx_count = stats_rx_count.load(Ordering::Relaxed);
+                let current_tx_bytes = stats_tx_bytes.load(Ordering::Relaxed);
+                let current_rx_bytes = stats_rx_bytes.load(Ordering::Relaxed);
+                let elapsed = start_time.elapsed();
+                
+                let tx_mbps = if elapsed.as_secs() > 0 {
+                    (current_tx_bytes / 1_000_000) / elapsed.as_secs()
+                } else { 0 };
+                
+                let rx_mbps = if elapsed.as_secs() > 0 {
+                    (current_rx_bytes / 1_000_000) / elapsed.as_secs()
+                } else { 0 };
+                
+                let efficiency = if current_tx_count > 0 {
+                    (current_rx_count as f64 / current_tx_count as f64) * 100.0
+                } else { 0.0 };
+                
+                info!("[ONEWAY] TX: {} pkt, {} MB/s | RX: {} pkt, {} MB/s | Efficiency: {:.1}%",
+                      current_tx_count, tx_mbps, current_rx_count, rx_mbps, efficiency);
+                
+                if start_time.elapsed() >= test_duration {
+                    break;
+                }
+            }
+        });
+
+        // Wait for all tasks to complete
+        let (tx_result, rx_result, _stats_result) = tokio::join!(tx_task, rx_task, stats_task);
         
         // Check results
         if let Err(e) = tx_result {
