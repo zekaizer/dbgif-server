@@ -3,6 +3,7 @@ use async_trait::async_trait;
 use nusb::{DeviceInfo, Interface, MaybeFuture};
 use nusb::transfer::{ControlIn, ControlOut, ControlType, Recipient, Bulk, In, Out, Interrupt};
 use nusb::io::{EndpointRead, EndpointWrite};
+use nusb::descriptors::InterfaceDescriptor;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -75,6 +76,14 @@ impl PL25A1ConnectionState {
     }
 }
 
+/// Discovered USB endpoints
+#[derive(Debug, Clone)]
+struct UsbEndpoints {
+    bulk_out_addr: u8,
+    bulk_in_addr: u8,
+    interrupt_in_addr: Option<u8>,
+}
+
 /// PL-25A1 USB Transport
 pub struct BridgeUsbTransport {
     device_id: String,
@@ -82,7 +91,8 @@ pub struct BridgeUsbTransport {
     // Pre-created endpoints for better performance
     bulk_out_writer: Arc<Mutex<EndpointWrite<Bulk>>>,
     bulk_in_reader: Arc<Mutex<EndpointRead<Bulk>>>,
-    interrupt_reader: Arc<Mutex<EndpointRead<Interrupt>>>,
+    interrupt_reader: Option<Arc<Mutex<EndpointRead<Interrupt>>>>,
+    endpoints: UsbEndpoints,
     is_connected: bool,
 }
 
@@ -92,6 +102,54 @@ impl std::fmt::Debug for BridgeUsbTransport {
             .field("device_id", &self.device_id)
             .field("is_connected", &self.is_connected)
             .finish_non_exhaustive()
+    }
+}
+
+impl UsbEndpoints {
+    /// Discover USB endpoints from interface descriptors
+    fn discover_from_interface(interface_desc: &InterfaceDescriptor) -> Result<Self> {
+        let mut bulk_out_addr = None;
+        let mut bulk_in_addr = None;
+        let mut interrupt_in_addr = None;
+
+        // Iterate through endpoints
+        for endpoint_desc in interface_desc.endpoints() {
+            let addr = endpoint_desc.address();
+            let is_in = (addr & 0x80) != 0;
+            
+            match endpoint_desc.transfer_type() {
+                nusb::descriptors::TransferType::Bulk => {
+                    if is_in {
+                        bulk_in_addr = Some(addr);
+                        info!("Found bulk IN endpoint: 0x{:02x}", addr);
+                    } else {
+                        bulk_out_addr = Some(addr);
+                        info!("Found bulk OUT endpoint: 0x{:02x}", addr);
+                    }
+                }
+                nusb::descriptors::TransferType::Interrupt => {
+                    if is_in {
+                        interrupt_in_addr = Some(addr);
+                        info!("Found interrupt IN endpoint: 0x{:02x}", addr);
+                    }
+                }
+                _ => {} // Ignore control and isochronous endpoints
+            }
+        }
+
+        let bulk_out_addr = bulk_out_addr.ok_or_else(|| {
+            anyhow::anyhow!("No bulk OUT endpoint found")
+        })?;
+        
+        let bulk_in_addr = bulk_in_addr.ok_or_else(|| {
+            anyhow::anyhow!("No bulk IN endpoint found") 
+        })?;
+
+        Ok(Self {
+            bulk_out_addr,
+            bulk_in_addr,
+            interrupt_in_addr,
+        })
     }
 }
 
@@ -111,18 +169,33 @@ impl BridgeUsbTransport {
             .wait()
             .context("Failed to claim USB interface")?;
 
+        // Discover endpoints from interface descriptors
+        let interface_descs: Vec<_> = interface.descriptors().collect();
+        let interface_desc = interface_descs.first()
+            .ok_or_else(|| anyhow::anyhow!("No interface descriptors found"))?;
+        let endpoints = UsbEndpoints::discover_from_interface(interface_desc)?;
+        
+        info!("Using discovered endpoints: bulk_out=0x{:02x}, bulk_in=0x{:02x}, interrupt_in={:?}", 
+              endpoints.bulk_out_addr, endpoints.bulk_in_addr, endpoints.interrupt_in_addr);
+
         // Create pre-configured endpoints for better performance
-        let bulk_out_endpoint = interface.endpoint::<Bulk, Out>(BULK_OUT_EP)
+        let bulk_out_endpoint = interface.endpoint::<Bulk, Out>(endpoints.bulk_out_addr)
             .context("Failed to open bulk out endpoint")?;
         let bulk_out_writer = bulk_out_endpoint.writer(MAXDATA);
         
-        let bulk_in_endpoint = interface.endpoint::<Bulk, In>(BULK_IN_EP)
+        let bulk_in_endpoint = interface.endpoint::<Bulk, In>(endpoints.bulk_in_addr)
             .context("Failed to open bulk in endpoint")?;
         let bulk_in_reader = bulk_in_endpoint.reader(MAXDATA);
         
-        let interrupt_endpoint = interface.endpoint::<Interrupt, In>(INTERRUPT_IN_EP)
-            .context("Failed to open interrupt in endpoint")?;
-        let interrupt_reader = interrupt_endpoint.reader(64);
+        // Create interrupt reader if interrupt endpoint exists
+        let interrupt_reader = if let Some(interrupt_addr) = endpoints.interrupt_in_addr {
+            let interrupt_endpoint = interface.endpoint::<Interrupt, In>(interrupt_addr)
+                .context("Failed to open interrupt in endpoint")?;
+            Some(Arc::new(Mutex::new(interrupt_endpoint.reader(64))))
+        } else {
+            warn!("No interrupt endpoint found - interrupt polling will be disabled");
+            None
+        };
 
         info!("PL-25A1 USB device {} initialized", device_id);
 
@@ -131,7 +204,8 @@ impl BridgeUsbTransport {
             interface: Arc::new(Mutex::new(interface)),
             bulk_out_writer: Arc::new(Mutex::new(bulk_out_writer)),
             bulk_in_reader: Arc::new(Mutex::new(bulk_in_reader)),
-            interrupt_reader: Arc::new(Mutex::new(interrupt_reader)),
+            interrupt_reader,
+            endpoints,
             is_connected: true,
         };
 
@@ -265,19 +339,24 @@ impl BridgeUsbTransport {
 
     /// Poll interrupt endpoint for connection status updates
     pub async fn poll_interrupt(&self) -> Result<Vec<u8>> {
-        let mut reader = self.interrupt_reader.lock().await;
-        
-        let mut buffer = vec![0u8; 64];
-        match tokio::time::timeout(
-            INTERRUPT_TIMEOUT,
-            reader.read(&mut buffer),
-        ).await {
-            Ok(Ok(size)) => {
-                buffer.truncate(size);
-                Ok(buffer)
+        if let Some(interrupt_reader) = &self.interrupt_reader {
+            let mut reader = interrupt_reader.lock().await;
+            
+            let mut buffer = vec![0u8; 64];
+            match tokio::time::timeout(
+                INTERRUPT_TIMEOUT,
+                reader.read(&mut buffer),
+            ).await {
+                Ok(Ok(size)) => {
+                    buffer.truncate(size);
+                    Ok(buffer)
+                }
+                Ok(Err(e)) => Err(e.into()),
+                Err(_) => Ok(Vec::new()), // Timeout, no data
             }
-            Ok(Err(e)) => Err(e.into()),
-            Err(_) => Ok(Vec::new()), // Timeout, no data
+        } else {
+            // No interrupt endpoint available
+            Ok(Vec::new())
         }
     }
 
