@@ -152,11 +152,8 @@ impl UsbEndpoints {
 impl BridgeUsbTransport {
     /// Create new PL-25A1 USB transport for a device
     pub async fn new(device_info: DeviceInfo) -> Result<Self> {
-        // Generate device ID from serial or bus:address
-        let device_id = match device_info.serial_number() {
-            Some(serial) => format!("pl25a1_{}", serial),
-            None => format!("pl25a1_{}:{}", device_info.bus_id(), device_info.device_address()),
-        };
+        // Use device address with pl25a1 prefix for device identification
+        let device_id = format!("pl25a1:{}", device_info.device_address());
 
         // Open device and claim interface
         let device = device_info.open().wait().context("Failed to open USB device")?;

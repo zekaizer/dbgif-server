@@ -156,11 +156,8 @@ impl AndroidUsbTransport {
         let vendor_id = device_info.vendor_id();
         let product_id = device_info.product_id();
         
-        // Get device serial number or use bus:address as fallback
-        let device_id = match device_info.serial_number() {
-            Some(serial) => serial.to_string(),
-            None => format!("android_{}:{}", device_info.bus_id(), device_info.device_address()),
-        };
+        // Use device address with android prefix for device identification
+        let device_id = format!("android:{}", device_info.device_address());
 
         // Open device and claim interface
         let device = device_info.open().wait().context("Failed to open USB device")?;
