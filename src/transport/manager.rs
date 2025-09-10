@@ -140,7 +140,7 @@ impl TransportManager {
 
         match transports.get_mut(device_id) {
             Some(transport) => {
-                let raw_data = transport.receive().await.map_err(|e| {
+                let raw_data = transport.receive(4096).await.map_err(|e| {
                     error!("Failed to receive data from {}: {}", device_id, e);
                     e
                 })?;

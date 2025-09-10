@@ -88,7 +88,7 @@ mod debug_enabled {
             if tracing::enabled!(tracing::Level::TRACE) {
                 let hex_dump = hex_dump_string(
                     &format!("{} [{}]", direction, self.device_id),
-                    &raw_data,
+                    data,
                     Some(256),
                 );
                 trace!("\n{}", hex_dump);
@@ -117,8 +117,8 @@ mod debug_enabled {
         }
 
         #[inline]
-        async fn receive(&mut self) -> Result<Vec<u8>> {
-            let result = self.inner.receive().await;
+        async fn receive(&mut self, buffer_size: usize) -> Result<Vec<u8>> {
+            let result = self.inner.receive(buffer_size).await;
 
             match &result {
                 Ok(data) => {
@@ -248,8 +248,8 @@ mod debug_disabled {
         }
 
         #[inline(always)]
-        async fn receive(&mut self) -> Result<Vec<u8>> {
-            self.inner.receive().await
+        async fn receive(&mut self, buffer_size: usize) -> Result<Vec<u8>> {
+            self.inner.receive(buffer_size).await
         }
 
         #[inline(always)]

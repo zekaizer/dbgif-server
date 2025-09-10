@@ -65,7 +65,7 @@ impl fmt::Display for ConnectionStatus {
 #[async_trait]
 pub trait Transport: Send + Sync {
     async fn send(&mut self, data: &[u8]) -> Result<()>;
-    async fn receive(&mut self) -> Result<Vec<u8>>;
+    async fn receive(&mut self, buffer_size: usize) -> Result<Vec<u8>>;
 
     /// Attempt to establish connection and return current status
     /// 

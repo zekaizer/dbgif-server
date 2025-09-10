@@ -193,7 +193,7 @@ impl Transport for LoopbackTransport {
         Ok(())
     }
 
-    async fn receive(&mut self) -> Result<Vec<u8>> {
+    async fn receive(&mut self, _buffer_size: usize) -> Result<Vec<u8>> {
         if !self.is_connected {
             return Err(anyhow::anyhow!("Loopback transport not connected"));
         }

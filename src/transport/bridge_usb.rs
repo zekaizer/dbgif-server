@@ -39,6 +39,9 @@ const INTERRUPT_IN_EP: u8 = 0x83;
 const USB_TIMEOUT: Duration = Duration::from_secs(5);
 const INTERRUPT_TIMEOUT: Duration = Duration::from_millis(100);
 
+// USB packet size alignment (typical bulk endpoint max packet size)
+const USB_BULK_MAX_PACKET_SIZE: usize = 64;
+
 /// PL-25A1 Connection State
 #[derive(Debug, Clone, Copy)]
 pub struct PL25A1ConnectionState {
@@ -341,70 +344,36 @@ impl BridgeUsbTransport {
         Ok(())
     }
 
-    /// Receive data from USB device
-    async fn receive_bytes_internal(&mut self) -> Result<Vec<u8>> {
+    /// Receive data from USB device with specified buffer size
+    /// Returns (data, actual_received_size)
+    async fn receive_bytes_internal(&mut self, buffer_size: usize) -> Result<(Vec<u8>, usize)> {
         let interface = self.interface.lock().await;
 
-        // Read header first (24 bytes)
-        let request_buffer = RequestBuffer::new(24);
+        // Align buffer size down to USB packet boundary for optimal transfer
+        let aligned_size = (buffer_size / USB_BULK_MAX_PACKET_SIZE) * USB_BULK_MAX_PACKET_SIZE;
+        let final_size = if aligned_size == 0 { 
+            USB_BULK_MAX_PACKET_SIZE 
+        } else { 
+            aligned_size.min(MAXDATA) 
+        };
+        
+        let request_buffer = RequestBuffer::new(final_size);
         let completion = interface.bulk_in(BULK_IN_EP, request_buffer).await;
         
         if let Err(e) = completion.status {
             self.is_connected = false;
-            return Err(anyhow::anyhow!("Header receive failed: {}", e));
+            return Err(anyhow::anyhow!("USB receive failed: {}", e));
         }
         
-        if completion.data.len() != 24 {
-            self.is_connected = false;
-            bail!(
-                "Invalid header size received: {} (expected 24)",
-                completion.data.len()
-            );
-        }
-        
-        let header_buffer = completion.data;
-
-        // Parse header to get data length
-        use bytes::Buf;
-        let mut header_cursor = std::io::Cursor::new(&header_buffer);
-        let _command_raw = header_cursor.get_u32_le();
-        let _arg0 = header_cursor.get_u32_le();
-        let _arg1 = header_cursor.get_u32_le();
-        let data_length = header_cursor.get_u32_le();
-
-        let mut full_data = header_buffer;
-
-        // Read data if present
-        if data_length > 0 {
-            if data_length as usize > MAXDATA {
-                bail!("Data too large: {} bytes (max: {})", data_length, MAXDATA);
-            }
-
-            let request_buffer = RequestBuffer::new(data_length as usize);
-            let completion = interface.bulk_in(BULK_IN_EP, request_buffer).await;
-            
-            if let Err(e) = completion.status {
-                self.is_connected = false;
-                return Err(anyhow::anyhow!("Data receive failed: {}", e));
-            }
-            
-            if completion.data.len() != data_length as usize {
-                self.is_connected = false;
-                bail!(
-                    "Invalid data size received: {} (expected {})",
-                    completion.data.len(),
-                    data_length
-                );
-            }
-            
-            full_data.extend_from_slice(&completion.data);
-        }
+        let received_data = completion.data;
+        let actual_size = received_data.len();
 
         debug!(
-            "Received {} bytes from PL-25A1 device {}",
-            full_data.len(), self.device_id
+            "Received {} bytes from PL-25A1 device {} (requested: {}, aligned: {})",
+            actual_size, self.device_id, buffer_size, final_size
         );
-        Ok(full_data)
+        
+        Ok((received_data, actual_size))
     }
 
     /// Read connection status from interrupt endpoint or vendor command
@@ -448,11 +417,12 @@ impl Transport for BridgeUsbTransport {
         self.send_bytes_internal(data).await
     }
 
-    async fn receive(&mut self) -> Result<Vec<u8>> {
+    async fn receive(&mut self, buffer_size: usize) -> Result<Vec<u8>> {
         if !self.is_connected {
             bail!("PL-25A1 device {} is not connected", self.device_id);
         }
-        self.receive_bytes_internal().await
+        let (data, _actual_size) = self.receive_bytes_internal(buffer_size).await?;
+        Ok(data)
     }
 
     fn device_id(&self) -> &str {

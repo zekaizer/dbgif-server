@@ -106,7 +106,8 @@ impl Transport for TcpTransport {
         self.send_bytes_internal(data).await
     }
 
-    async fn receive(&mut self) -> Result<Vec<u8>> {
+    async fn receive(&mut self, _buffer_size: usize) -> Result<Vec<u8>> {
+        // TCP reads complete messages regardless of buffer_size
         match self.read_bytes_internal().await? {
             Some(data) => Ok(data),
             None => Err(anyhow::anyhow!("Connection closed")),

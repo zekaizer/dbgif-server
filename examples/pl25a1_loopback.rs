@@ -383,7 +383,7 @@ impl LoopbackTestApp {
             info!("Side B: Starting receive (waiting for data)...");
             let mut transport = side_b_transport.lock().await;
             
-            match timeout(Duration::from_secs(3), transport.receive()).await {
+            match timeout(Duration::from_secs(3), transport.receive(4096)).await {
                 Ok(Ok(raw_data)) => {
                     let msg = Message::deserialize(raw_data.as_slice())?;
                     info!("✓ Side B: Received {} bytes: {:02x?}", 
@@ -557,7 +557,7 @@ impl LoopbackTestApp {
         // Side B: Receive and echo back
         let _echo_data = {
             let mut transport_b = self.side_b.transport.lock().await;
-            match timeout(OPERATION_TIMEOUT, transport_b.receive()).await {
+            match timeout(OPERATION_TIMEOUT, transport_b.receive(4096)).await {
                 Ok(Ok(raw_data)) => {
                     let received_msg = Message::deserialize(raw_data.as_slice())?;
                     // Extract raw data and echo it back
@@ -578,7 +578,7 @@ impl LoopbackTestApp {
         // Side A: Receive echo
         let echo_response = {
             let mut transport_a = self.side_a.transport.lock().await;
-            let raw_data = timeout(OPERATION_TIMEOUT, transport_a.receive()).await
+            let raw_data = timeout(OPERATION_TIMEOUT, transport_a.receive(4096)).await
                 .context("Timeout waiting for echo")?
                 .context("Failed to receive echo")?;
             Message::deserialize(raw_data.as_slice())
