@@ -38,11 +38,11 @@ struct Args {
     duration: u64,
 
     /// Data size per transfer in bytes
-    #[arg(long, default_value = "1024")]
+    #[arg(long, default_value = "65536")]
     size: usize,
 
     /// Delay between transfers in milliseconds
-    #[arg(long, default_value = "100")]
+    #[arg(long, default_value = "0")]
     delay: u64,
 
     /// Enable CSV output for statistics

@@ -37,8 +37,8 @@ const USB_INTERFACE: u8 = 0;
 const USB_TIMEOUT: Duration = Duration::from_secs(5);
 const INTERRUPT_TIMEOUT: Duration = Duration::from_millis(100);
 
-// USB packet size alignment (typical bulk endpoint max packet size)
-const USB_BULK_MAX_PACKET_SIZE: usize = 64;
+// USB packet size alignment (USB 2.0 High Speed bulk endpoint max packet size)
+const USB_BULK_MAX_PACKET_SIZE: usize = 512;
 
 /// PL-25A1 Connection State
 #[derive(Debug, Clone, Copy)]
@@ -171,14 +171,14 @@ impl BridgeUsbTransport {
         info!("Using discovered endpoints: bulk_out=0x{:02x}, bulk_in=0x{:02x}, interrupt_in={:?}", 
               endpoints.bulk_out_addr, endpoints.bulk_in_addr, endpoints.interrupt_in_addr);
 
-        // Create pre-configured endpoints for better performance
+        // Create pre-configured endpoints with larger buffers for better performance
         let bulk_out_endpoint = interface.endpoint::<Bulk, Out>(endpoints.bulk_out_addr)
             .context("Failed to open bulk out endpoint")?;
-        let bulk_out_writer = bulk_out_endpoint.writer(MAXDATA);
+        let bulk_out_writer = bulk_out_endpoint.writer(2 * 1024 * 1024); // 2MB buffer
         
         let bulk_in_endpoint = interface.endpoint::<Bulk, In>(endpoints.bulk_in_addr)
             .context("Failed to open bulk in endpoint")?;
-        let bulk_in_reader = bulk_in_endpoint.reader(MAXDATA);
+        let bulk_in_reader = bulk_in_endpoint.reader(2 * 1024 * 1024); // 2MB buffer
         
         // Create interrupt reader if interrupt endpoint exists
         let interrupt_reader = if let Some(interrupt_addr) = endpoints.interrupt_in_addr {

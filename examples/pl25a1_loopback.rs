@@ -31,7 +31,7 @@ struct Args {
     duration: u64,
     
     /// Data size per transfer in bytes
-    #[arg(short, long, default_value = "1024")]
+    #[arg(short, long, default_value = "65536")]
     size: usize,
     
     /// Number of parallel streams

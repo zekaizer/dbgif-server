@@ -87,8 +87,8 @@ const SUPPORTED_ANDROID_DEVICES: &[(u16, u16)] = &[
 const USB_INTERFACE: u8 = 0;
 
 
-// USB packet size alignment (typical bulk endpoint max packet size)
-const USB_BULK_MAX_PACKET_SIZE: usize = 64;
+// USB packet size alignment (USB 2.0 High Speed bulk endpoint max packet size)
+const USB_BULK_MAX_PACKET_SIZE: usize = 512;
 
 /// Discovered USB endpoints
 #[derive(Debug, Clone)]
@@ -175,14 +175,14 @@ impl AndroidUsbTransport {
         info!("Using discovered endpoints: bulk_out=0x{:02x}, bulk_in=0x{:02x}", 
               endpoints.bulk_out_addr, endpoints.bulk_in_addr);
 
-        // Create pre-configured endpoints for better performance
+        // Create pre-configured endpoints with larger buffers for better performance
         let bulk_out_endpoint = interface.endpoint::<Bulk, Out>(endpoints.bulk_out_addr)
             .context("Failed to open bulk out endpoint")?;
-        let bulk_out_writer = bulk_out_endpoint.writer(MAXDATA);
+        let bulk_out_writer = bulk_out_endpoint.writer(2 * 1024 * 1024); // 2MB buffer
         
         let bulk_in_endpoint = interface.endpoint::<Bulk, In>(endpoints.bulk_in_addr)
             .context("Failed to open bulk in endpoint")?;
-        let bulk_in_reader = bulk_in_endpoint.reader(MAXDATA);
+        let bulk_in_reader = bulk_in_endpoint.reader(2 * 1024 * 1024); // 2MB buffer
 
         info!(
             "Android USB device {} ({:04x}:{:04x}) initialized",
