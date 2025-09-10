@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::{sync::Mutex, time::timeout};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 // PL-25A1 Device identifiers
 const PL25A1_VID: u16 = 0x067b;
