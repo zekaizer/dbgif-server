@@ -371,46 +371,78 @@ impl LoopbackTestApp {
             bail!("Devices not ready for communication");
         }
         
-        // Step 2: Simple data transfer A → B
-        info!("Step 2: Testing data transfer from A to B...");
+        // Step 2: Concurrent data transfer test (RX first, then TX)
+        info!("Step 2: Testing concurrent data transfer A → B...");
         
         let test_data = vec![0xDE, 0xAD, 0xBE, 0xEF]; // 4 bytes test pattern
-        info!("Sending {} bytes from Side A: {:02x?}", test_data.len(), test_data);
+        let test_data_clone = test_data.clone();
         
-        // Send from A
-        {
-            let mut transport_a = self.side_a.transport.lock().await;
-            let msg = Message::new(Command::Write, 0, 0, test_data.clone());
-            transport_a.send_message(&msg).await
-                .context("Failed to send from Side A")?;
-            info!("✓ Side A: Data sent successfully");
-        }
-        
-        // Try to receive on B with shorter timeout
-        info!("Waiting for data on Side B (timeout: 2s)...");
-        {
-            let mut transport_b = self.side_b.transport.lock().await;
-            match timeout(Duration::from_secs(2), transport_b.receive_message()).await {
-                Ok(Ok(received_msg)) => {
+        // Side B 수신 태스크 (먼저 시작)
+        let side_b_transport = Arc::clone(&self.side_b.transport);
+        let rx_task = tokio::spawn(async move {
+            info!("Side B: Starting receive (waiting for data)...");
+            let mut transport = side_b_transport.lock().await;
+            
+            match timeout(Duration::from_secs(3), transport.receive_message()).await {
+                Ok(Ok(msg)) => {
                     info!("✓ Side B: Received {} bytes: {:02x?}", 
-                          received_msg.data.len(), &received_msg.data[..]);
-                    
-                    if received_msg.data == test_data {
-                        info!("✓✓✓ DATA MATCH! Basic connectivity test PASSED!");
-                        return Ok(());
-                    } else {
-                        warn!("✗ Data mismatch!");
-                        warn!("  Expected: {:02x?}", test_data);
-                        warn!("  Received: {:02x?}", received_msg.data);
-                    }
+                          msg.data.len(), &msg.data[..]);
+                    Ok(msg.data.to_vec())
                 }
                 Ok(Err(e)) => {
                     warn!("✗ Side B receive error: {}", e);
+                    Err(anyhow::anyhow!("Receive error: {}", e))
                 }
                 Err(_) => {
                     warn!("✗ Side B receive timeout - no data received");
+                    Err(anyhow::anyhow!("Receive timeout"))
                 }
             }
+        });
+        
+        // 수신 태스크가 준비되도록 짧은 대기
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        
+        // Side A 전송 태스크
+        let side_a_transport = Arc::clone(&self.side_a.transport);
+        let tx_task = tokio::spawn(async move {
+            info!("Side A: Sending {} bytes: {:02x?}", 
+                  test_data_clone.len(), test_data_clone);
+            
+            let mut transport = side_a_transport.lock().await;
+            let msg = Message::new(Command::Write, 0, 0, test_data_clone.clone());
+            
+            match transport.send_message(&msg).await {
+                Ok(_) => {
+                    info!("✓ Side A: Data sent successfully");
+                    Ok::<Vec<u8>, anyhow::Error>(test_data_clone)
+                }
+                Err(e) => {
+                    warn!("✗ Side A send error: {}", e);
+                    Err::<Vec<u8>, anyhow::Error>(e)
+                }
+            }
+        });
+        
+        // 두 태스크 완료 대기
+        info!("Waiting for both TX and RX tasks to complete...");
+        let (rx_result, tx_result) = tokio::join!(rx_task, tx_task);
+        
+        // 결과 검증
+        let sent_data = tx_result
+            .context("TX task panicked")?
+            .context("TX task failed")?;
+        let received_data = rx_result
+            .context("RX task panicked")?
+            .context("RX task failed")?;
+        
+        if received_data == sent_data {
+            info!("✓✓✓ DATA MATCH! Basic connectivity test PASSED!");
+            return Ok(());
+        } else {
+            warn!("✗ Data mismatch!");
+            warn!("  Expected: {:02x?}", sent_data);
+            warn!("  Received: {:02x?}", received_data);
         }
         
         // Step 3: Alternative test - check if data is stuck in buffer
