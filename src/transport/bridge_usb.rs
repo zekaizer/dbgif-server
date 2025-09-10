@@ -32,10 +32,6 @@ const STATUS_CONNECTOR_ID: u8 = 0x08;
 // USB interface configuration
 const USB_INTERFACE: u8 = 0;
 
-// Endpoint addresses (typical for PL-25A1)
-const BULK_OUT_EP: u8 = 0x02;
-const BULK_IN_EP: u8 = 0x81;
-const INTERRUPT_IN_EP: u8 = 0x83;
 
 // Timeouts
 const USB_TIMEOUT: Duration = Duration::from_secs(5);

@@ -3,9 +3,9 @@ use async_trait::async_trait;
 use nusb::{DeviceInfo, Interface, MaybeFuture};
 use nusb::transfer::{Bulk, In, Out};
 use nusb::io::{EndpointRead, EndpointWrite};
+use nusb::descriptors::InterfaceDescriptor;
 // Control transfer imports not needed for Android USB
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, info};
@@ -86,15 +86,56 @@ const SUPPORTED_ANDROID_DEVICES: &[(u16, u16)] = &[
 // USB interface configuration
 const USB_INTERFACE: u8 = 0;
 
-// Endpoint addresses (typical for Android ADB)
-const BULK_OUT_EP: u8 = 0x01;  // Host -> Device
-const BULK_IN_EP: u8 = 0x81;   // Device -> Host
-
-// Timeout for USB operations (kept for future use)
-const USB_TIMEOUT: Duration = Duration::from_secs(5);
 
 // USB packet size alignment (typical bulk endpoint max packet size)
 const USB_BULK_MAX_PACKET_SIZE: usize = 64;
+
+/// Discovered USB endpoints
+#[derive(Debug, Clone)]
+struct UsbEndpoints {
+    bulk_out_addr: u8,
+    bulk_in_addr: u8,
+}
+
+impl UsbEndpoints {
+    /// Discover USB endpoints from interface descriptors
+    fn discover_from_interface(interface_desc: &InterfaceDescriptor) -> Result<Self> {
+        let mut bulk_out_addr = None;
+        let mut bulk_in_addr = None;
+
+        // Iterate through endpoints
+        for endpoint_desc in interface_desc.endpoints() {
+            let addr = endpoint_desc.address();
+            let is_in = (addr & 0x80) != 0;
+            
+            match endpoint_desc.transfer_type() {
+                nusb::descriptors::TransferType::Bulk => {
+                    if is_in {
+                        bulk_in_addr = Some(addr);
+                        info!("Found bulk IN endpoint: 0x{:02x}", addr);
+                    } else {
+                        bulk_out_addr = Some(addr);
+                        info!("Found bulk OUT endpoint: 0x{:02x}", addr);
+                    }
+                }
+                _ => {} // Only interested in bulk endpoints for Android ADB
+            }
+        }
+
+        let bulk_out_addr = bulk_out_addr.ok_or_else(|| {
+            anyhow::anyhow!("No bulk OUT endpoint found")
+        })?;
+        
+        let bulk_in_addr = bulk_in_addr.ok_or_else(|| {
+            anyhow::anyhow!("No bulk IN endpoint found") 
+        })?;
+
+        Ok(Self {
+            bulk_out_addr,
+            bulk_in_addr,
+        })
+    }
+}
 
 /// Android USB device transport
 pub struct AndroidUsbTransport {
@@ -103,6 +144,7 @@ pub struct AndroidUsbTransport {
     // Pre-created endpoints for better performance
     bulk_out_writer: Arc<Mutex<EndpointWrite<Bulk>>>,
     bulk_in_reader: Arc<Mutex<EndpointRead<Bulk>>>,
+    endpoints: UsbEndpoints,
     is_connected: bool,
     vendor_id: u16,
     product_id: u16,
@@ -127,12 +169,21 @@ impl AndroidUsbTransport {
             .wait()
             .context("Failed to claim USB interface")?;
 
+        // Discover endpoints from interface descriptors
+        let interface_descs: Vec<_> = interface.descriptors().collect();
+        let interface_desc = interface_descs.first()
+            .ok_or_else(|| anyhow::anyhow!("No interface descriptors found"))?;
+        let endpoints = UsbEndpoints::discover_from_interface(interface_desc)?;
+        
+        info!("Using discovered endpoints: bulk_out=0x{:02x}, bulk_in=0x{:02x}", 
+              endpoints.bulk_out_addr, endpoints.bulk_in_addr);
+
         // Create pre-configured endpoints for better performance
-        let bulk_out_endpoint = interface.endpoint::<Bulk, Out>(BULK_OUT_EP)
+        let bulk_out_endpoint = interface.endpoint::<Bulk, Out>(endpoints.bulk_out_addr)
             .context("Failed to open bulk out endpoint")?;
         let bulk_out_writer = bulk_out_endpoint.writer(MAXDATA);
         
-        let bulk_in_endpoint = interface.endpoint::<Bulk, In>(BULK_IN_EP)
+        let bulk_in_endpoint = interface.endpoint::<Bulk, In>(endpoints.bulk_in_addr)
             .context("Failed to open bulk in endpoint")?;
         let bulk_in_reader = bulk_in_endpoint.reader(MAXDATA);
 
@@ -146,6 +197,7 @@ impl AndroidUsbTransport {
             interface: Arc::new(Mutex::new(interface)),
             bulk_out_writer: Arc::new(Mutex::new(bulk_out_writer)),
             bulk_in_reader: Arc::new(Mutex::new(bulk_in_reader)),
+            endpoints,
             is_connected: true,
             vendor_id,
             product_id,
