@@ -292,6 +292,18 @@ pub struct LoopbackTestApp {
 }
 
 impl LoopbackTestApp {
+    /// Calculate remaining timeout for operations within a test duration
+    fn calculate_remaining_timeout(&self, start_time: Instant, max_duration: Duration) -> Duration {
+        let elapsed = start_time.elapsed();
+        if elapsed >= max_duration {
+            Duration::from_millis(100) // Minimum timeout to avoid immediate failures
+        } else {
+            let remaining = max_duration - elapsed;
+            // Use smaller of remaining time or operation timeout (5 seconds)
+            remaining.min(OPERATION_TIMEOUT)
+        }
+    }
+
     pub async fn new(args: Args) -> Result<Self> {
         info!("Initializing PL-25A1 Loopback Test Application...");
         info!("Test Pattern: {:?}", args.pattern);
@@ -382,7 +394,7 @@ impl LoopbackTestApp {
             info!("Side B: Starting receive (waiting for data)...");
             let mut transport = side_b_transport.lock().await;
             
-            match timeout(Duration::from_secs(3), transport.receive(4096)).await {
+            match timeout(OPERATION_TIMEOUT, transport.receive(4096)).await {
                 Ok(Ok(raw_data)) => {
                     info!("✓ Side B: Received {} bytes: {:02x?}", 
                           raw_data.len(), &raw_data[..raw_data.len().min(8)]);
@@ -484,8 +496,14 @@ impl LoopbackTestApp {
             
             while start_time.elapsed() < test_duration {
                 let mut transport = side_a_transport.lock().await;
-                match transport.send(&tx_data).await {
-                    Ok(_) => {
+                let remaining_time = if start_time.elapsed() >= test_duration {
+                    Duration::from_millis(100)
+                } else {
+                    (test_duration - start_time.elapsed()).min(OPERATION_TIMEOUT)
+                };
+                
+                match tokio::time::timeout(remaining_time, transport.send(&tx_data)).await {
+                    Ok(Ok(_)) => {
                         local_count += 1;
                         local_bytes += tx_data.len() as u64;
                         
@@ -495,8 +513,12 @@ impl LoopbackTestApp {
                             tx_bytes_clone.fetch_add(tx_data.len() as u64 * 100, Ordering::Relaxed);
                         }
                     }
-                    Err(e) => {
+                    Ok(Err(e)) => {
                         warn!("TX failed: {}", e);
+                        break;
+                    }
+                    Err(_) => {
+                        warn!("TX timeout");
                         break;
                     }
                 }
@@ -522,8 +544,14 @@ impl LoopbackTestApp {
             
             while start_time.elapsed() < test_duration {
                 let mut transport = side_b_transport.lock().await;
-                match transport.receive(expected_size + 1024).await {
-                    Ok(received_data) => {
+                let remaining_time = if start_time.elapsed() >= test_duration {
+                    Duration::from_millis(100)
+                } else {
+                    (test_duration - start_time.elapsed()).min(OPERATION_TIMEOUT)
+                };
+                
+                match tokio::time::timeout(remaining_time, transport.receive(expected_size + 1024)).await {
+                    Ok(Ok(received_data)) => {
                         local_count += 1;
                         local_bytes += received_data.len() as u64;
                         
@@ -533,9 +561,13 @@ impl LoopbackTestApp {
                             rx_bytes_clone.fetch_add(received_data.len() as u64 * 100, Ordering::Relaxed);
                         }
                     }
-                    Err(e) => {
+                    Ok(Err(e)) => {
                         warn!("RX failed: {}", e);
                         tokio::time::sleep(Duration::from_millis(1)).await; // Brief pause on error
+                    }
+                    Err(_) => {
+                        warn!("RX timeout");
+                        tokio::time::sleep(Duration::from_millis(1)).await; // Brief pause on timeout
                     }
                 }
                 drop(transport); // Release lock between receives
@@ -702,10 +734,13 @@ impl LoopbackTestApp {
     }
 
     /// Send raw data and verify echo response (maximum speed, concurrent tasks)
-    async fn send_and_verify(&mut self, data: &[u8]) -> Result<usize> {
-        let start = Instant::now();
+    async fn send_and_verify(&mut self, data: &[u8], start_time: Instant, max_duration: Duration) -> Result<usize> {
+        let operation_start = Instant::now();
         let data_len = data.len();
         let data_clone = data.to_vec();
+        
+        // Calculate remaining timeout for this operation
+        let remaining_timeout = self.calculate_remaining_timeout(start_time, max_duration);
         
         // Task 1: Side B RX (start first to be ready for incoming data)
         let side_b_transport_rx = Arc::clone(&self.side_b.transport);
@@ -725,9 +760,9 @@ impl LoopbackTestApp {
             transport.send(&data_for_tx).await
         });
         
-        // Wait for RX to complete, then start echo
-        let received_data = rx_task.await
-            .context("RX task failed")?
+        // Wait for RX to complete with timeout, then start echo
+        let received_data = tokio::time::timeout(remaining_timeout, rx_task).await
+            .context("RX task timeout")??
             .context("Failed to receive data")?;
         
         // Task 3: Side B TX (echo back)
@@ -744,12 +779,14 @@ impl LoopbackTestApp {
             transport.receive(data_len + 1024).await
         });
         
-        // Wait for all tasks to complete
-        let (tx_result, echo_result, echo_response_result) = tokio::join!(
-            tx_task,
-            echo_task,
-            final_rx_task
-        );
+        // Wait for all tasks to complete with timeout
+        let timeout_for_remaining = self.calculate_remaining_timeout(start_time, max_duration);
+        let (tx_result, echo_result, echo_response_result) = tokio::time::timeout(
+            timeout_for_remaining,
+            async {
+                tokio::join!(tx_task, echo_task, final_rx_task)
+            }
+        ).await.context("Overall operation timeout")?;
         
         // Check results
         tx_result.context("TX task failed")?.context("Failed to send data")?;
@@ -758,7 +795,7 @@ impl LoopbackTestApp {
             .context("Final RX task failed")?
             .context("Failed to receive echo")?;
         
-        let latency = start.elapsed();
+        let latency = operation_start.elapsed();
         
         // Quick data integrity check
         if echo_response.len() != data.len() || echo_response != data {
@@ -793,7 +830,7 @@ impl LoopbackTestApp {
         let mut count = 0;
         
         while start.elapsed() < duration {
-            match self.send_and_verify(&test_data).await {
+            match self.send_and_verify(&test_data, start, duration).await {
                 Ok(_) => count += 1,
                 Err(e) => {
                     warn!("Echo test failed: {}", e);
@@ -822,7 +859,7 @@ impl LoopbackTestApp {
         while start.elapsed() < duration {
             let data = self.generate_test_data(self.args.size, Some(0xBB));
             
-            match self.send_and_verify(&data).await {
+            match self.send_and_verify(&data, start, duration).await {
                 Ok(_) => transfer_count += 1,
                 Err(e) => {
                     warn!("Bulk transfer failed: {}", e);
@@ -854,7 +891,7 @@ impl LoopbackTestApp {
             let size = rng.gen_range(1..=max_size);
             let data = self.generate_test_data(size, None); // Random data
             
-            match self.send_and_verify(&data).await {
+            match self.send_and_verify(&data, start, duration).await {
                 Ok(_) => transfer_count += 1,
                 Err(e) => {
                     warn!("Random transfer failed: {}", e);
@@ -902,7 +939,7 @@ impl LoopbackTestApp {
             if burst_phase {
                 // High throughput phase - large data, no delay
                 let data = self.generate_test_data(self.args.size * 4, Some(0xCC));
-                match self.send_and_verify(&data).await {
+                match self.send_and_verify(&data, start, duration).await {
                     Ok(_) => {},
                     Err(e) => {
                         warn!("Burst transfer failed: {}", e);
@@ -938,7 +975,7 @@ impl LoopbackTestApp {
                 self.generate_test_data(self.args.size, Some(0xEE))
             };
             
-            match self.send_and_verify(&data).await {
+            match self.send_and_verify(&data, start, duration).await {
                 Ok(_) => {},
                 Err(e) => {
                     warn!("Bidirectional transfer failed: {}", e);
@@ -966,7 +1003,7 @@ impl LoopbackTestApp {
         let large_data = self.generate_test_data(self.args.size.max(65536), Some(0xFF));
         
         while start.elapsed() < duration {
-            match self.send_and_verify(&large_data).await {
+            match self.send_and_verify(&large_data, start, duration).await {
                 Ok(_) => {},
                 Err(e) => {
                     warn!("Stress transfer failed: {}", e);
