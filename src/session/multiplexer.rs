@@ -1,5 +1,5 @@
 use crate::protocol::{AdbMessage as Message, Command};
-use anyhow::{Result, Context};
+use anyhow::Result;
 use bytes::Bytes;
 use std::collections::HashMap;
 use std::sync::Arc;

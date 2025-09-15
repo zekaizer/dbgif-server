@@ -11,33 +11,33 @@ Replace polling-based USB device discovery with `nusb::watch_devices()` event-dr
 - Include exact file paths in descriptions
 
 ## Phase 3.1: Setup
-- [ ] T001 Check nusb version in Cargo.toml matches requirements (>= 0.1.0)
-- [ ] T002 Run cargo check to ensure all dependencies compile
+- [x] T001 Check nusb version in Cargo.toml matches requirements (>= 0.1.0)
+- [x] T002 Run cargo check to ensure all dependencies compile
 
 ## Phase 3.2: Tests First (TDD) ⚠️ MUST COMPLETE BEFORE 3.3
 **CRITICAL: These tests MUST be written and MUST FAIL before ANY implementation**
-- [ ] T003 [P] Contract test for HotplugEventProcessor in tests/contract/test_hotplug_events.rs
-- [ ] T004 [P] Contract test for DiscoveryEventIntegration in tests/contract/test_discovery_integration.rs
-- [ ] T005 [P] Basic hotplug detection test in tests/integration/test_hotplug_basic.rs
-- [ ] T006 [P] Event conversion test in tests/unit/test_discovery_events.rs
+- [x] T003 [P] Contract test for HotplugEventProcessor in tests/contract/test_hotplug_events.rs
+- [x] T004 [P] Contract test for DiscoveryEventIntegration in tests/contract/test_discovery_integration.rs
+- [x] T005 [P] Basic hotplug detection test in tests/integration/test_hotplug_basic.rs
+- [x] T006 [P] Event conversion test in tests/unit/test_discovery_events.rs
 
 ## Phase 3.3: Core Implementation (ONLY after tests are failing)
-- [ ] T007 [P] Implement HotplugEvent entity in src/transport/hotplug/events.rs
-- [ ] T008 [P] Implement DetectionMechanism entity in src/transport/hotplug/detection.rs
-- [ ] T009 Implement HotplugEventProcessor trait in src/transport/usb_monitor.rs
-- [ ] T010 Add nusb::watch_devices() support to src/discovery/coordinator.rs
-- [ ] T011 Modify discovery_loop() to use hotplug events instead of timer
-- [ ] T012 Convert nusb HotplugEvent to existing DiscoveryEvent format
-- [ ] T013 Remove or minimize polling timer usage
+- [x] T007 [P] Implement HotplugEvent entity in src/transport/hotplug/events.rs
+- [x] T008 [P] Implement DetectionMechanism entity in src/transport/hotplug/detection.rs
+- [x] T009 Implement HotplugEventProcessor trait in src/transport/usb_monitor.rs
+- [x] T010 Add nusb::watch_devices() support to src/discovery/coordinator.rs
+- [x] T011 Modify discovery_loop() to use hotplug events instead of timer
+- [x] T012 Convert nusb HotplugEvent to existing DiscoveryEvent format
+- [x] T013 Remove or minimize polling timer usage
 
 ## Phase 3.4: Manual Testing & Validation
-- [ ] T014 Test with real USB device using quickstart.md scenarios
-- [ ] T015 Verify CPU usage drops when idle (no polling)
-- [ ] T016 Verify existing DiscoveryEvent consumers still work unchanged
+- [x] T014 Test with real USB device using quickstart.md scenarios
+- [x] T015 Verify CPU usage drops when idle (no polling)
+- [x] T016 Verify existing DiscoveryEvent consumers still work unchanged
 
 ## Phase 3.5: Polish
-- [ ] T017 [P] Update CLAUDE.md with hotplug implementation notes
-- [ ] T018 Clean up any debug logging or temporary code
+- [x] T017 [P] Update CLAUDE.md with hotplug implementation notes
+- [x] T018 Clean up any debug logging or temporary code
 - [ ] T019 Run cargo clippy and fix any warnings
 
 ## Dependencies

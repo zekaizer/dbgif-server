@@ -1,9 +1,11 @@
 use crate::transport::{TransportManager, DeviceInfo, TransportType};
+use crate::transport::{UsbHotplugMonitor, HotplugEventProcessor};
 use anyhow::Result;
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 use std::time::Duration;
+use tracing::{debug, info, warn, error};
 
 /// Events that can occur during device discovery
 #[derive(Debug, Clone)]
@@ -20,6 +22,7 @@ pub struct DeviceDiscoveryCoordinator {
     event_sender: mpsc::UnboundedSender<DiscoveryEvent>,
     discovery_interval: Duration,
     hotplug_enabled: bool,
+    hotplug_monitor: Arc<RwLock<Option<Arc<UsbHotplugMonitor>>>>,
 }
 
 impl DeviceDiscoveryCoordinator {
@@ -31,8 +34,9 @@ impl DeviceDiscoveryCoordinator {
             transport_manager,
             known_devices: Arc::new(RwLock::new(HashSet::new())),
             event_sender,
-            discovery_interval: Duration::from_secs(1), // Fast polling for responsive hotplug
+            discovery_interval: Duration::from_secs(5), // Slower polling when hotplug is available
             hotplug_enabled: true,
+            hotplug_monitor: Arc::new(RwLock::new(None)), // Will be initialized in start() if hotplug is enabled
         }
     }
 
@@ -48,24 +52,71 @@ impl DeviceDiscoveryCoordinator {
             event_sender,
             discovery_interval,
             hotplug_enabled,
+            hotplug_monitor: Arc::new(RwLock::new(None)),
         }
     }
 
     /// Start continuous device discovery and hotplug monitoring
     pub async fn start(&self) -> Result<()> {
         if !self.hotplug_enabled {
-            tracing::info!("Device discovery coordinator disabled");
+            info!("Device discovery coordinator disabled");
             return Ok(());
         }
 
+        // Initialize hotplug monitor
+        let mut hotplug_monitor = UsbHotplugMonitor::new();
+
+        // Set up hotplug event forwarding
+        let event_sender = self.event_sender.clone();
+        let (hotplug_tx, mut hotplug_rx) = mpsc::channel(100);
+        hotplug_monitor.set_discovery_sender(hotplug_tx);
+
+        // Try to start hotplug monitoring
+        match hotplug_monitor.start_monitoring().await {
+            Ok(mut hotplug_event_rx) => {
+                info!("Hotplug monitoring started successfully");
+
+                let monitor_arc = Arc::new(hotplug_monitor);
+                let monitor_for_task = Arc::clone(&monitor_arc);
+
+                // Spawn hotplug event processor
+                tokio::spawn(async move {
+                    while let Some(hotplug_event) = hotplug_event_rx.recv().await {
+                        if let Err(e) = monitor_for_task.process_event(hotplug_event).await {
+                            warn!("Failed to process hotplug event: {}", e);
+                        }
+                    }
+                });
+
+                // Spawn discovery event forwarder
+                tokio::spawn(async move {
+                    while let Some(discovery_event) = hotplug_rx.recv().await {
+                        if let Err(e) = event_sender.send(discovery_event) {
+                            error!("Failed to forward discovery event: {}", e);
+                            break;
+                        }
+                    }
+                });
+
+                *self.hotplug_monitor.write().await = Some(monitor_arc);
+                info!("Using hotplug-based device detection with reduced polling");
+            }
+            Err(e) => {
+                warn!("Failed to start hotplug monitoring, using polling fallback: {}", e);
+                // Continue with polling-only approach
+            }
+        }
+
+        // Start polling loop (either as primary method or fallback)
         let coordinator = self.clone();
         tokio::spawn(async move {
             coordinator.discovery_loop().await;
         });
 
-        tracing::info!(
-            "Device discovery coordinator started (interval: {:?})",
-            self.discovery_interval
+        info!(
+            "Device discovery coordinator started (interval: {:?}, hotplug: {})",
+            self.discovery_interval,
+            self.hotplug_monitor.read().await.is_some()
         );
         Ok(())
     }
@@ -88,28 +139,77 @@ impl DeviceDiscoveryCoordinator {
 
     /// Force refresh of device list
     pub async fn refresh(&self) -> Result<()> {
-        tracing::debug!("Forcing device discovery refresh");
+        debug!("Forcing device discovery refresh");
         self.scan_once().await?;
         Ok(())
     }
 
+    /// Check if hotplug monitoring is active
+    pub async fn is_hotplug_active(&self) -> bool {
+        self.hotplug_monitor.read().await.is_some()
+    }
+
+    /// Get hotplug statistics if available
+    pub async fn get_hotplug_stats(&self) -> Option<crate::transport::DetectionStats> {
+        if let Some(ref monitor) = *self.hotplug_monitor.read().await {
+            Some(monitor.stats().await)
+        } else {
+            None
+        }
+    }
+
     /// Main discovery loop for continuous monitoring
     async fn discovery_loop(&self) {
-        let mut interval = tokio::time::interval(self.discovery_interval);
+        // Check if hotplug is available - if so, disable polling completely
+        let has_hotplug = self.hotplug_monitor.read().await.is_some();
 
-        loop {
-            interval.tick().await;
+        if has_hotplug {
+            info!("Hotplug monitoring active - disabling periodic polling entirely");
 
+            // Run initial scan once, then rely purely on hotplug events
+            debug!("Running initial device discovery scan before switching to hotplug-only mode");
             match self.transport_manager.discover_all_devices().await {
                 Ok(devices) => {
                     self.process_discovered_devices(&devices).await;
                 }
                 Err(e) => {
-                    tracing::warn!("Device discovery scan failed: {}", e);
+                    warn!("Initial device discovery scan failed: {}", e);
+                }
+            }
 
-                    let _ = self.event_sender.send(DiscoveryEvent::DiscoveryError(
-                        format!("Discovery failed: {}", e)
-                    ));
+            // Keep thread alive but don't do periodic scanning - hotplug handles everything
+            info!("Hotplug-only mode: polling disabled, relying entirely on USB hotplug events");
+
+            // Sleep indefinitely - hotplug events will handle device changes
+            loop {
+                tokio::time::sleep(Duration::from_secs(3600)).await; // Wake up every hour just to stay alive
+                debug!("Hotplug-only mode heartbeat - no polling required");
+            }
+        } else {
+            // Fallback to polling mode when hotplug is not available
+            warn!("Hotplug monitoring unavailable - falling back to polling mode");
+
+            let mut interval = tokio::time::interval(self.discovery_interval);
+
+            debug!("Discovery loop started with polling interval: {:?} (fallback mode)",
+                self.discovery_interval);
+
+            loop {
+                interval.tick().await;
+
+                debug!("Running periodic device discovery scan (polling fallback)");
+
+                match self.transport_manager.discover_all_devices().await {
+                    Ok(devices) => {
+                        self.process_discovered_devices(&devices).await;
+                    }
+                    Err(e) => {
+                        warn!("Device discovery scan failed: {}", e);
+
+                        let _ = self.event_sender.send(DiscoveryEvent::DiscoveryError(
+                            format!("Discovery failed: {}", e)
+                        ));
+                    }
                 }
             }
         }
@@ -127,7 +227,7 @@ impl DeviceDiscoveryCoordinator {
         // Find newly connected devices
         for device in devices {
             if !known_devices.contains(&device.device_id) {
-                tracing::info!(
+                info!(
                     "New device detected: {} ({})",
                     device.device_id,
                     device.display_name
@@ -146,7 +246,7 @@ impl DeviceDiscoveryCoordinator {
             .collect();
 
         for device_id in disconnected_devices {
-            tracing::info!("Device disconnected: {}", device_id);
+            info!("Device disconnected: {}", device_id);
 
             known_devices.remove(&device_id);
 
@@ -199,6 +299,7 @@ impl Clone for DeviceDiscoveryCoordinator {
             event_sender: self.event_sender.clone(),
             discovery_interval: self.discovery_interval,
             hotplug_enabled: self.hotplug_enabled,
+            hotplug_monitor: Arc::clone(&self.hotplug_monitor),
         }
     }
 }

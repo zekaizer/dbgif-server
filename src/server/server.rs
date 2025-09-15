@@ -79,7 +79,7 @@ impl DbgifServer {
                             let transport_manager = self.transport_manager.clone();
                             let session_manager = self.session_manager.clone();
                             tokio::spawn(async move {
-                                let mut handler =
+                                let handler =
                                     ClientHandler::new(client_id.to_string(), stream, transport_manager, session_manager);
 
                                 if let Err(e) = handler.handle().await {

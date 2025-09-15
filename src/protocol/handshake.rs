@@ -1,5 +1,5 @@
 use super::{AdbMessage as Message, Command};
-use anyhow::{Result, Context};
+use anyhow::Result;
 use bytes::Bytes;
 use std::time::{Duration, Instant};
 

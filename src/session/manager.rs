@@ -1,4 +1,4 @@
-use crate::protocol::{AdbMessage as Message, Command, HandshakeManager, HandshakeHandler, HandshakeState};
+use crate::protocol::{AdbMessage as Message, HandshakeManager, HandshakeHandler};
 use crate::transport::TransportManager;
 use anyhow::{Result, Context};
 use std::collections::HashMap;

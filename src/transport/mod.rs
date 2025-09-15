@@ -63,11 +63,15 @@ pub mod mock_transport;
 pub mod tcp_transport;
 pub mod usb_device_transport;
 pub mod usb_bridge_transport;
+pub mod hotplug;
+pub mod usb_monitor;
 
 pub use mock_transport::*;
 pub use tcp_transport::*;
 pub use usb_device_transport::*;
 pub use usb_bridge_transport::*;
+pub use hotplug::*;
+pub use usb_monitor::*;
 
 pub mod manager;
 

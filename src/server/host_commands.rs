@@ -1,7 +1,6 @@
-use crate::transport::{TransportManager, DeviceInfo};
-use anyhow::{Result, Context};
+use crate::transport::TransportManager;
+use anyhow::Result;
 use bytes::Bytes;
-use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
@@ -368,8 +367,8 @@ impl HostCommandProcessor {
             });
         }
 
-        let bus_str = parts[0];
-        let device_str = parts[1];
+        let _bus_str = parts[0];
+        let _device_str = parts[1];
 
         // Find device by USB bus/device numbers
         match self.transport_manager.discover_all_devices().await {

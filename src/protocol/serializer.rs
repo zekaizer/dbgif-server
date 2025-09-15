@@ -1,6 +1,6 @@
 use super::{AdbMessage as Message, Command};
 use anyhow::{Result, Context};
-use bytes::{Bytes, BytesMut, BufMut};
+use bytes::{Bytes, BytesMut};
 use std::io::Write;
 
 /// ADB message serializer for converting messages to byte streams

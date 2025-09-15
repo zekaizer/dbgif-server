@@ -210,11 +210,11 @@ impl ClientConnectionHandler {
     }
 
     /// Handle the client connection
-    pub async fn handle(mut self) -> Result<()> {
+    pub async fn handle(self) -> Result<()> {
         // Set up connection timeout
         let connection_future = async {
             // Import the actual client handler implementation
-            let mut client_handler = crate::server::ClientHandler::new(
+            let client_handler = crate::server::ClientHandler::new(
                 self.client_id.clone(),
                 self.stream,
                 Arc::clone(&self.transport_manager),

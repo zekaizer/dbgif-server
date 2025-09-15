@@ -312,7 +312,7 @@ impl AdbDaemon {
                 self.session_manager.shutdown_all_sessions().await;
 
                 // Disconnect all transports
-                self.transport_manager.disconnect_all().await;
+                let _ = self.transport_manager.disconnect_all().await;
 
                 // Small delay to ensure everything is cleaned up
                 sleep(Duration::from_millis(100)).await;
@@ -400,11 +400,6 @@ async fn device_discovery_task(
             }
         }
 
-        // TODO: Handle hotplug events if enabled
-        if enable_hotplug {
-            // For now, we rely on polling
-            // In a more advanced implementation, we would listen for hotplug events
-        }
     }
 }
 
