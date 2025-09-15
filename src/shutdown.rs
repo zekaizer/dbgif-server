@@ -284,6 +284,7 @@ async fn wait_for_system_signal() -> ShutdownReason {
 
     #[cfg(windows)]
     {
+        use tokio::signal;
         match signal::ctrl_c().await {
             Ok(()) => {
                 info!("Received Ctrl+C");
@@ -298,6 +299,7 @@ async fn wait_for_system_signal() -> ShutdownReason {
 
     #[cfg(not(any(unix, windows)))]
     {
+        use tokio::signal;
         // Fallback for other platforms
         match signal::ctrl_c().await {
             Ok(()) => {

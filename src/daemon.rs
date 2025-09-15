@@ -164,7 +164,7 @@ impl AdbDaemon {
     async fn start_tcp_server(&mut self) -> Result<()> {
         info!("Starting TCP server on {}", self.config.server.bind_address);
 
-        let mut tcp_server = AdbTcpServer::with_config(
+        let tcp_server = AdbTcpServer::with_config(
             self.config.server.bind_address,
             Arc::clone(&self.transport_manager),
             Arc::clone(&self.session_manager),
@@ -172,21 +172,14 @@ impl AdbDaemon {
             self.config.server.max_connections,
         );
 
-        // Get shutdown sender before moving server to task
-        let shutdown_sender = tcp_server.shutdown_sender();
-
-        // Start server in background task
+        // Start server in background task without extracting shutdown sender
+        // The server will manage its own shutdown lifecycle
         let _server_task = tokio::spawn(async move {
+            let mut tcp_server = tcp_server;
             if let Err(e) = tcp_server.start().await {
                 error!("TCP server error: {}", e);
             }
         });
-
-        // Store shutdown sender for graceful shutdown
-        if let Some(_sender) = shutdown_sender {
-            // We'll use this for shutdown coordination
-            // For now, we'll handle it in the shutdown method
-        }
 
         info!("TCP server started");
         Ok(())
@@ -220,18 +213,39 @@ impl AdbDaemon {
             let mut sigterm = signal(SignalKind::terminate()).expect("Failed to register SIGTERM handler");
             let mut sigint = signal(SignalKind::interrupt()).expect("Failed to register SIGINT handler");
 
-            tokio::select! {
-                _ = sigterm.recv() => {
-                    info!("Received SIGTERM");
-                }
-                _ = sigint.recv() => {
-                    info!("Received SIGINT");
+            loop {
+                tokio::select! {
+                    result = sigterm.recv() => {
+                        match result {
+                            Some(()) => {
+                                info!("Received SIGTERM");
+                                break;
+                            }
+                            None => {
+                                debug!("SIGTERM stream ended");
+                                break;
+                            }
+                        }
+                    }
+                    result = sigint.recv() => {
+                        match result {
+                            Some(()) => {
+                                info!("Received SIGINT");
+                                break;
+                            }
+                            None => {
+                                debug!("SIGINT stream ended");
+                                break;
+                            }
+                        }
+                    }
                 }
             }
         }
 
         #[cfg(windows)]
         {
+            use tokio::signal;
             match signal::ctrl_c().await {
                 Ok(()) => info!("Received Ctrl+C"),
                 Err(e) => error!("Failed to listen for Ctrl+C: {}", e),
@@ -240,6 +254,7 @@ impl AdbDaemon {
 
         #[cfg(not(any(unix, windows)))]
         {
+            use tokio::signal;
             // Fallback for other platforms
             match signal::ctrl_c().await {
                 Ok(()) => info!("Received interrupt signal"),
