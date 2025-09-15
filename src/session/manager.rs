@@ -470,7 +470,7 @@ mod tests {
 
         // Process CNXN message
         let cnxn_message = Message::new(
-            Command::CNXN,
+            crate::protocol::Command::CNXN,
             0x01000000,
             256 * 1024,
             bytes::Bytes::from("client_system"),

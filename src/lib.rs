@@ -8,6 +8,7 @@ pub mod server;
 pub mod services;
 pub mod session;
 pub mod shutdown;
+pub mod test_client;
 pub mod transport;
 pub mod utils;
 
@@ -20,5 +21,6 @@ pub use server::*;
 pub use services::*;
 pub use session::*;
 pub use shutdown::*;
+pub use test_client::*;
 pub use transport::*;
 pub use utils::*;

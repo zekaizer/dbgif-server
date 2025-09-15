@@ -34,47 +34,47 @@
 - Test client library: `src/test_client/`
 
 ## Phase 3.1: Setup
-- [ ] T001 Create test client module structure in `src/test_client/` with mod.rs
-- [ ] T002 Add CLI binary entry point in `src/bin/dbgif-test-client.rs` with clap integration
-- [ ] T003 [P] Update `Cargo.toml` with new binary configuration and ensure clap is available
-- [ ] T004 [P] Configure workspace for test client with proper module exports in `src/lib.rs`
+- [x] T001 Create test client module structure in `src/test_client/` with mod.rs
+- [x] T002 Add CLI binary entry point in `src/bin/dbgif-test-client.rs` with clap integration
+- [x] T003 [P] Update `Cargo.toml` with new binary configuration and ensure clap is available
+- [x] T004 [P] Configure workspace for test client with proper module exports in `src/lib.rs`
 
 ## Phase 3.2: Tests First (TDD) ⚠️ MUST COMPLETE BEFORE 3.3
 **CRITICAL: These tests MUST be written and MUST FAIL before ANY implementation**
-- [ ] T005 [P] Contract test for CLI ping command in `tests/contract/test_cli_ping.rs`
-- [ ] T006 [P] Contract test for CLI host-commands in `tests/contract/test_cli_host.rs`
-- [ ] T007 [P] Contract test for CLI multi-connect in `tests/contract/test_cli_multi.rs`
-- [ ] T008 [P] Protocol behavior test for CNXN handshake in `tests/contract/test_protocol_handshake.rs`
-- [ ] T009 [P] Protocol behavior test for message validation in `tests/contract/test_protocol_validation.rs`
-- [ ] T010 [P] Integration test for single connection flow in `tests/integration/test_single_connection.rs`
-- [ ] T011 [P] Integration test for concurrent connections in `tests/integration/test_concurrent_connections.rs`
-- [ ] T012 [P] Integration test for error scenarios in `tests/integration/test_error_handling.rs`
+- [x] T005 [P] Contract test for CLI ping command in `tests/test_cli_ping.rs`
+- [x] T006 [P] Contract test for CLI host-commands in `tests/contract/test_cli_host.rs`
+- [x] T007 [P] Contract test for CLI multi-connect in `tests/contract/test_cli_multi.rs`
+- [x] T008 [P] Protocol behavior test for CNXN handshake in `tests/contract/test_protocol_handshake.rs`
+- [x] T009 [P] Protocol behavior test for message validation in `tests/contract/test_protocol_validation.rs`
+- [x] T010 [P] Integration test for single connection flow in `tests/integration/test_single_connection.rs`
+- [x] T011 [P] Integration test for concurrent connections in `tests/integration/test_concurrent_connections.rs`
+- [x] T012 [P] Integration test for error scenarios in `tests/integration/test_error_handling.rs`
 
 ## Phase 3.3: Core Implementation (ONLY after tests are failing)
-- [ ] T013 [P] TestSession model in `src/test_client/models/session.rs`
-- [ ] T014 [P] TestResult model in `src/test_client/models/result.rs`
-- [ ] T015 [P] TestType and TestStatus enums in `src/test_client/models/types.rs`
-- [ ] T016 [P] ProtocolExchange model in `src/test_client/models/protocol.rs`
-- [ ] T017 Connection manager in `src/test_client/connection.rs` (uses existing protocol module)
-- [ ] T018 Test executor logic in `src/test_client/executor.rs`
-- [ ] T019 Result reporter in `src/test_client/reporter.rs` (console + JSON output)
-- [ ] T020 CLI ping command implementation in `src/test_client/commands/ping.rs`
-- [ ] T021 CLI host-commands implementation in `src/test_client/commands/host.rs`
-- [ ] T022 CLI multi-connect implementation in `src/test_client/commands/multi.rs`
-- [ ] T023 CLI argument parsing and routing in `src/test_client/cli.rs`
+- [x] T013 [P] TestSession model in `src/test_client/models/session.rs`
+- [x] T014 [P] TestResult model in `src/test_client/models/result.rs`
+- [x] T015 [P] TestType and TestStatus enums in `src/test_client/models/types.rs`
+- [x] T016 [P] ProtocolExchange model in `src/test_client/models/protocol.rs`
+- [x] T017 Connection manager in `src/test_client/connection.rs` (uses existing protocol module)
+- [x] T018 TestClientCli integrated implementation in `src/test_client/cli.rs` (combines T018-T023)
+- [x] T019 Result reporter integrated in CLI (console + JSON output)
+- [x] T020 CLI ping command implementation integrated in CLI
+- [x] T021 CLI host-commands implementation integrated in CLI
+- [x] T022 CLI multi-connect implementation integrated in CLI
+- [x] T023 CLI argument parsing and routing in `src/bin/dbgif-test-client.rs`
 
 ## Phase 3.4: Integration
-- [ ] T024 Protocol compliance validation using existing `src/protocol/` modules
-- [ ] T025 Error handling and timeout management in connection logic
-- [ ] T026 Structured logging integration with tracing crate
-- [ ] T027 JSON output formatting for automation scripts
-- [ ] T028 Performance measurement and reporting (connection times, throughput)
+- [x] T024 Protocol compliance validation using existing `src/protocol/` modules
+- [x] T025 Error handling and timeout management in connection logic
+- [x] T026 Structured logging integration with tracing crate
+- [x] T027 JSON output formatting for automation scripts
+- [x] T028 Performance measurement and reporting (connection times, throughput)
 
 ## Phase 3.5: Polish
-- [ ] T029 [P] Unit tests for data models in `tests/unit/test_models.rs`
-- [ ] T030 [P] Unit tests for result formatting in `tests/unit/test_reporter.rs`
-- [ ] T031 [P] Performance validation against baseline (<1s for basic tests)
-- [ ] T032 [P] Update quickstart.md with actual usage examples and validate all scenarios
+- [x] T029 [P] Unit tests for data models in `tests/unit/test_models.rs`
+- [x] T030 [P] Unit tests for result formatting in `tests/unit/test_reporter.rs`
+- [x] T031 [P] Performance validation against baseline (<1s for basic tests)
+- [x] T032 [P] Update quickstart.md with actual usage examples and validate all scenarios
 
 ## Dependencies
 - Setup (T001-T004) before everything else
