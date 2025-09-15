@@ -7,6 +7,7 @@ pub enum TransportType {
     Tcp,
     UsbDevice,
     UsbBridge,
+    Echo,
 }
 
 impl fmt::Display for TransportType {
@@ -15,6 +16,7 @@ impl fmt::Display for TransportType {
             TransportType::Tcp => write!(f, "TCP"),
             TransportType::UsbDevice => write!(f, "USB Device"),
             TransportType::UsbBridge => write!(f, "USB Bridge"),
+            TransportType::Echo => write!(f, "Echo"),
         }
     }
 }
@@ -24,6 +26,7 @@ pub enum ConnectionInfo {
     Tcp { host: String, port: u16 },
     UsbDevice { vid: u16, pid: u16, serial: String, path: String },
     UsbBridge { vid: u16, pid: u16, serial: String, path: String, bridge_status: String },
+    Echo { host: String, port: u16 },
 }
 
 #[derive(Debug, Clone)]
@@ -63,6 +66,7 @@ pub mod mock_transport;
 pub mod tcp_transport;
 pub mod usb_device_transport;
 pub mod usb_bridge_transport;
+pub mod echo_transport;
 pub mod hotplug;
 pub mod usb_monitor;
 
@@ -70,6 +74,7 @@ pub use mock_transport::*;
 pub use tcp_transport::*;
 pub use usb_device_transport::*;
 pub use usb_bridge_transport::*;
+pub use echo_transport::*;
 pub use hotplug::*;
 pub use usb_monitor::*;
 

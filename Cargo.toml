@@ -36,6 +36,10 @@ futures = "0.3"
 name = "dbgif-test-client"
 path = "src/bin/dbgif-test-client.rs"
 
+[[bin]]
+name = "echo-server"
+path = "src/bin/echo-server.rs"
+
 [[bench]]
 name = "transport_benchmarks"
 harness = false

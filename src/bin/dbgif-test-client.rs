@@ -55,6 +55,27 @@ enum Commands {
         #[arg(short, long, default_value_t = 3)]
         count: u8,
     },
+    /// Run aging test for long-duration stability testing
+    Aging {
+        /// Target host (default: localhost for echo service)
+        #[arg(long, default_value = "localhost")]
+        host: String,
+        /// Target port (default: 5038 for echo service)
+        #[arg(short, long, default_value_t = 5038)]
+        port: u16,
+        /// Test duration in seconds (max: 3600)
+        #[arg(short, long, default_value_t = 60)]
+        duration: u64,
+        /// Packet size in bytes (1-65536)
+        #[arg(long, default_value_t = 1024)]
+        packet_size: usize,
+        /// Interval between packets in milliseconds (min: 10)
+        #[arg(short, long, default_value_t = 100)]
+        interval: u64,
+        /// Number of concurrent connections (1-10)
+        #[arg(short, long, default_value_t = 1)]
+        connections: u8,
+    },
 }
 
 #[tokio::main]
@@ -97,6 +118,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::MultiConnect { host, port, count } => {
             let count = count.min(10); // Enforce max 10 connections
             test_client.multi_connect(&host, port, count).await
+        }
+        Commands::Aging { host, port, duration, packet_size, interval, connections } => {
+            test_client.aging(&host, port, duration, packet_size, interval, connections).await
         }
     };
 

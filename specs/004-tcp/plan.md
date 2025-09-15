@@ -29,7 +29,7 @@
 - Phase 3-4: Implementation execution (manual or via tools)
 
 ## Summary
-TCP 테스트 클라이언트를 개발하여 DBGIF 서버의 기본 동작을 검증한다. 클라이언트는 포트 5037로 연결하여 CNXN 핸드셰이크, 기본 host 명령어 실행, 다중 연결 테스트를 수행하고 결과를 콘솔에 출력한다. 개인 프로젝트이므로 단순하고 실용적인 접근을 취한다.
+TCP 테스트 클라이언트를 개발하여 DBGIF 서버의 기본 동작을 검증한다. 클라이언트는 포트 5037로 연결하여 CNXN 핸드셰이크, 기본 host 명령어 실행, 다중 연결 테스트를 수행하고 결과를 콘솔에 출력한다. 추가로 서버에 echo service transport를 구현하여 에이징 테스트(장시간 연결 유지, 반복 데이터 송수신)를 지원한다. 개인 프로젝트이므로 단순하고 실용적인 접근을 취한다.
 
 ## Technical Context
 **Language/Version**: Rust 1.75+ (edition 2021)
@@ -38,9 +38,10 @@ TCP 테스트 클라이언트를 개발하여 DBGIF 서버의 기본 동작을 �
 **Testing**: cargo test
 **Target Platform**: Linux/Windows (cross-platform)
 **Project Type**: single (CLI application)
-**Performance Goals**: 연결 테스트 <1초, 동시 연결 10개 이하
+**Performance Goals**: 연결 테스트 <1초, 동시 연결 10개 이하, 에이징 테스트 (최대 1시간)
 **Constraints**: 메모리 사용량 최소화, 외부 의존성 최소화 (개인 프로젝트)
-**Scale/Scope**: 단일 바이너리, 기본 프로토콜 검증 (오버엔지니어링 지양)
+**Scale/Scope**: 단일 바이너리, 기본 프로토콜 검증 + echo service transport (오버엔지니어링 지양)
+**Echo Service**: TCP echo transport로 패킷 송수신 에이징 테스트 지원
 
 ## Constitution Check
 *GATE: Must pass before Phase 0 research. Re-check after Phase 1 design.*
@@ -52,9 +53,9 @@ TCP 테스트 클라이언트를 개발하여 DBGIF 서버의 기본 동작을 �
 - Avoiding patterns? YES (no Repository - 직접 TCP 통신)
 
 **Architecture**:
-- EVERY feature as library? PARTIAL (test-client lib + CLI wrapper)
-- Libraries listed: test-client (TCP 연결 및 프로토콜 검증)
-- CLI per library: dbgif-test-client --help/--version/--format
+- EVERY feature as library? PARTIAL (test-client lib + CLI wrapper + echo transport)
+- Libraries listed: test-client (TCP 연결 및 프로토콜 검증), echo-transport (에이징 테스트용)
+- CLI per library: dbgif-test-client --help/--version/--format/--aging
 - Library docs: 간단한 README.md (개인프로젝트)
 
 **Testing (NON-NEGOTIABLE)**:
@@ -62,7 +63,7 @@ TCP 테스트 클라이언트를 개발하여 DBGIF 서버의 기본 동작을 �
 - Git commits show tests before implementation? YES
 - Order: Contract→Integration→E2E→Unit strictly followed? YES
 - Real dependencies used? YES (실제 TCP 연결)
-- Integration tests for: TCP 프로토콜 통신, 서버 응답 검증
+- Integration tests for: TCP 프로토콜 통신, 서버 응답 검증, echo service 에이징 테스트
 - FORBIDDEN: Implementation before test, skipping RED phase
 
 **Observability**:
@@ -127,6 +128,40 @@ ios/ or android/
 
 **Structure Decision**: Option 1 (Single project) - CLI 테스트 도구로 단순 구조 사용
 
+## Echo Service Transport Design
+
+### Purpose
+- **Aging Tests**: 장시간 연결 유지 및 반복 데이터 송수신으로 메모리 누수, 연결 안정성 검증
+- **Load Testing**: 다양한 패킷 크기와 빈도로 서버 부하 테스트
+- **Protocol Validation**: 실제 데이터 교환을 통한 DBGIF 프로토콜 검증
+
+### Implementation Strategy
+1. **Server Side**:
+   - `src/transport/echo_transport.rs` - echo 전용 transport 구현
+   - TCP 포트 5038 (5037과 분리하여 기본 서버 기능과 독립적 운영)
+   - 받은 데이터를 그대로 송신자에게 반환하는 단순 echo 서비스
+
+2. **Client Side**:
+   - `dbgif-test-client aging` 명령어 추가
+   - 설정 가능한 옵션: 패킷 크기, 전송 간격, 테스트 지속 시간
+   - 실시간 통계: 송수신 패킷 수, 응답 시간, 에러율
+
+### Configuration Options
+```bash
+dbgif-test-client aging [OPTIONS]
+  --duration <SECONDS>     테스트 지속 시간 (기본: 60초, 최대: 3600초)
+  --packet-size <BYTES>    패킷 크기 (기본: 1024, 범위: 64-65536)
+  --interval <MS>          전송 간격 밀리초 (기본: 100ms)
+  --connections <COUNT>    동시 연결 수 (기본: 1, 최대: 10)
+  --echo-port <PORT>       Echo 서비스 포트 (기본: 5038)
+```
+
+### Test Scenarios
+1. **Memory Leak Test**: 1시간 동안 1초마다 1KB 패킷 송수신
+2. **High Frequency Test**: 10ms 간격으로 64바이트 패킷을 10분간 송수신
+3. **Large Packet Test**: 64KB 패킷을 30초 간격으로 30분간 송수신
+4. **Multi-Connection Test**: 5개 연결로 동시에 각기 다른 패킷 크기 테스트
+
 ## Phase 0: Outline & Research
 1. **Extract unknowns from Technical Context** above:
    - For each NEEDS CLARIFICATION → research task
@@ -187,16 +222,20 @@ ios/ or android/
 - Load `/templates/tasks-template.md` as base
 - Generate tasks from Phase 1 design docs (contracts, data model, quickstart)
 - Each contract → contract test task [P]
-- Each entity → model creation task [P] 
+- Each entity → model creation task [P]
 - Each user story → integration test task
 - Implementation tasks to make tests pass
+- Echo service transport tasks:
+  - Server-side echo transport implementation
+  - Client-side aging command implementation
+  - Echo service integration tests
 
 **Ordering Strategy**:
 - TDD order: Tests before implementation 
 - Dependency order: Models before services before UI
 - Mark [P] for parallel execution (independent files)
 
-**Estimated Output**: 25-30 numbered, ordered tasks in tasks.md
+**Estimated Output**: 30-35 numbered, ordered tasks in tasks.md (기존 32개 + echo service 관련 3-5개)
 
 **IMPORTANT**: This phase is executed by the /tasks command, NOT by /plan
 
@@ -223,15 +262,17 @@ ios/ or android/
 - [x] Phase 0: Research complete (/plan command)
 - [x] Phase 1: Design complete (/plan command)
 - [x] Phase 2: Task planning complete (/plan command - describe approach only)
-- [ ] Phase 3: Tasks generated (/tasks command)
-- [ ] Phase 4: Implementation complete
-- [ ] Phase 5: Validation passed
+- [x] Phase 3: Basic tasks completed (T001-T032)
+- [ ] Phase 3.6: Echo service extension tasks (/tasks command for new tasks)
+- [ ] Phase 4: Echo service implementation complete
+- [ ] Phase 5: Echo service validation and aging tests passed
 
 **Gate Status**:
 - [x] Initial Constitution Check: PASS
 - [x] Post-Design Constitution Check: PASS
 - [x] All NEEDS CLARIFICATION resolved
 - [x] Complexity deviations documented (N/A - no deviations)
+- [ ] Echo service requirements integrated
 
 ---
 *Based on Constitution v2.1.1 - See `/memory/constitution.md`*

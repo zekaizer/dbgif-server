@@ -21,7 +21,7 @@
    → Different modules = [P] parallel execution
    → Tests before implementation (TDD)
    → Models before services before CLI
-5. SUCCESS (32 tasks ready for execution)
+5. SUCCESS (37 tasks ready for execution including echo service)
 ```
 
 ## Format: `[ID] [P?] Description`
@@ -32,6 +32,7 @@
 - **Single project**: `src/`, `tests/` at repository root
 - Binary location: `src/bin/dbgif-test-client.rs`
 - Test client library: `src/test_client/`
+- Echo transport: `src/transport/echo_transport.rs`
 
 ## Phase 3.1: Setup
 - [x] T001 Create test client module structure in `src/test_client/` with mod.rs
@@ -76,6 +77,14 @@
 - [x] T031 [P] Performance validation against baseline (<1s for basic tests)
 - [x] T032 [P] Update quickstart.md with actual usage examples and validate all scenarios
 
+## Phase 3.6: Echo Service Extension
+**CRITICAL: These tests MUST be written and MUST FAIL before ANY echo service implementation**
+- [ ] T033 [P] Contract test for CLI aging command in `tests/contract/test_cli_aging.rs`
+- [ ] T034 [P] Integration test for echo transport in `tests/integration/test_echo_transport.rs`
+- ~~[ ] T035 [P] Aging test scenarios for memory leak detection in `tests/aging/test_memory_leak.rs`~~
+- [ ] T036 Echo transport implementation in `src/transport/echo_transport.rs`
+- [ ] T037 CLI aging command implementation in `src/test_client/cli.rs` (extend existing)
+
 ## Dependencies
 - Setup (T001-T004) before everything else
 - Tests (T005-T012) before implementation (T013-T023)
@@ -83,6 +92,8 @@
 - Core commands (T020-T022) before CLI routing (T023)
 - Core implementation before integration (T024-T028)
 - Integration before polish (T029-T032)
+- Echo service tests (T033-T035) before echo implementation (T036-T037)
+- Core TCP client (T001-T032) before echo service extension (T033-T037)
 
 ## Parallel Example: Contract Tests Phase
 ```bash
@@ -111,6 +122,14 @@ Task: "CLI host-commands implementation in src/test_client/commands/host.rs"
 Task: "CLI multi-connect implementation in src/test_client/commands/multi.rs"
 ```
 
+## Parallel Example: Echo Service Tests Phase
+```bash
+# Launch T033-T035 together (different test files):
+Task: "Contract test for CLI aging command in tests/contract/test_cli_aging.rs"
+Task: "Integration test for echo transport in tests/integration/test_echo_transport.rs"
+Task: "Aging test scenarios for memory leak detection in tests/aging/test_memory_leak.rs"
+```
+
 ## Notes
 - [P] tasks = different files, no shared dependencies
 - Verify all tests fail before implementing (RED phase of TDD)
@@ -118,6 +137,8 @@ Task: "CLI multi-connect implementation in src/test_client/commands/multi.rs"
 - Reuse existing `src/protocol/` modules for DBGIF message handling
 - Keep implementation simple (개인 프로젝트, 오버엔지니어링 지양)
 - Maximum 10 concurrent connections for multi-connect tests
+- Echo service runs on separate port 5038 (독립적 운영)
+- Aging tests limited to 1 hour maximum duration
 
 ## Task Generation Rules Applied
 
@@ -125,6 +146,7 @@ Task: "CLI multi-connect implementation in src/test_client/commands/multi.rs"
    - ping command → T005 (contract test), T020 (implementation)
    - host-commands → T006 (contract test), T021 (implementation)
    - multi-connect → T007 (contract test), T022 (implementation)
+   - aging command → T033 (contract test), T037 (implementation)
 
 2. **From Protocol Behavior Contract**:
    - CNXN handshake → T008 (contract test), T024 (validation)
@@ -141,12 +163,21 @@ Task: "CLI multi-connect implementation in src/test_client/commands/multi.rs"
    - Concurrent connections → T011 (integration test)
    - Error handling → T012 (integration test)
 
+5. **From Echo Service Transport Design**:
+   - Echo transport → T034 (integration test), T036 (implementation)
+   - Aging test scenarios → T035 (aging tests)
+   - Memory leak detection → T035 (specialized test)
+
 ## Validation Checklist ✓
-- [x] All CLI contracts have corresponding tests (T005-T007)
+- [x] All CLI contracts have corresponding tests (T005-T007, T033)
 - [x] All protocol contracts have tests (T008-T009)
 - [x] All entities have model tasks (T013-T016)
-- [x] All tests come before implementation (Phase 3.2 → 3.3)
+- [x] All tests come before implementation (Phase 3.2 → 3.3, Phase 3.6 tests → implementation)
 - [x] Parallel tasks are truly independent (different files)
 - [x] Each task specifies exact file path
 - [x] No [P] task modifies same file as another [P] task
 - [x] TDD order enforced: RED (tests) → GREEN (implementation) → REFACTOR
+- [ ] Echo service CLI contracts have tests (T033)
+- [ ] Echo transport has integration tests (T034)
+- [ ] Aging test scenarios implemented (T035)
+- [ ] Echo service follows TDD: T033-T035 before T036-T037

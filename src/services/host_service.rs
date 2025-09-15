@@ -60,6 +60,7 @@ impl HostService {
                     TransportType::Tcp => "tcp",
                     TransportType::UsbDevice => "usb",
                     TransportType::UsbBridge => "bridge_usb",
+                    TransportType::Echo => "echo",
                 };
                 output.push_str(&format!("{}\t{}\t{}\n", transport_info.device_id, status, transport_type_str));
             } else {

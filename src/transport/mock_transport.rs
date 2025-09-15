@@ -156,6 +156,16 @@ impl TransportFactory for MockTransportFactory {
                 },
                 capabilities: vec!["usb_bridge".to_string(), "host_to_host".to_string()],
             },
+            TransportType::Echo => DeviceInfo {
+                device_id: "echo:127.0.0.1:5038".to_string(),
+                display_name: "Mock Echo Service".to_string(),
+                transport_type: TransportType::Echo,
+                connection_info: ConnectionInfo::Echo {
+                    host: "127.0.0.1".to_string(),
+                    port: 5038,
+                },
+                capabilities: vec!["echo".to_string(), "aging_test".to_string()],
+            },
         };
 
         Ok(vec![device])
@@ -184,6 +194,9 @@ impl TransportFactory for MockTransportFactory {
                     path.clone(),
                     bridge_status.clone(),
                 ))
+            }
+            ConnectionInfo::Echo { host, port } => {
+                Box::new(MockTransport::new_tcp(device_info.device_id.clone(), host.clone(), *port))
             }
         };
 

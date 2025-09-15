@@ -3,6 +3,8 @@ use crate::test_client::{ConnectionManager, TestSession, TestType};
 use std::time::{Duration, Instant};
 use futures::future::join_all;
 use tracing::{info, warn, debug, error, trace};
+use tokio::net::TcpStream;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 pub struct TestClientCli {
     verbose: bool,
@@ -306,4 +308,229 @@ impl TestClientCli {
                               successful_connections, count))
         }
     }
+
+    pub async fn aging(&self, host: &str, port: u16, duration: u64, packet_size: usize, interval: u64, connections: u8) -> Result<()> {
+        let duration = Duration::from_secs(duration.min(3600)); // Max 1 hour
+        let interval = Duration::from_millis(interval.max(10)); // Min 10ms interval
+        let connections = connections.min(10).max(1); // 1-10 connections
+        let packet_size = packet_size.min(65536).max(1); // 1B-64KB packets
+
+        let mut session = TestSession::new_with_type(TestType::Aging);
+        session.start_test(&format!("aging-{}:{}-{}s-{}b-{}ms-{}conn",
+                                   host, port, duration.as_secs(), packet_size, interval.as_millis(), connections));
+
+        if self.verbose {
+            println!("🔄 Starting aging test:");
+            println!("  Target: {}:{}", host, port);
+            println!("  Duration: {}s", duration.as_secs());
+            println!("  Packet size: {} bytes", packet_size);
+            println!("  Interval: {}ms", interval.as_millis());
+            println!("  Connections: {}", connections);
+        }
+
+        let start_time = Instant::now();
+        let end_time = start_time + duration;
+
+        // Create test data pattern
+        let test_data = create_test_pattern(packet_size);
+
+        // Start concurrent aging connections
+        let handles: Vec<_> = (0..connections)
+            .map(|conn_id| {
+                let host = host.to_string();
+                let test_data = test_data.clone();
+                let verbose = self.verbose;
+
+                tokio::spawn(async move {
+                    aging_connection_worker(conn_id, &host, port, end_time, test_data, interval, verbose).await
+                })
+            })
+            .collect();
+
+        // Monitor progress
+        let mut last_update = Instant::now();
+        while Instant::now() < end_time {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+
+            let elapsed = start_time.elapsed();
+            let remaining = duration.saturating_sub(elapsed);
+
+            if self.verbose && last_update.elapsed() >= Duration::from_secs(10) {
+                println!("🕐 Aging test progress: {:.1}% ({}/{}s remaining)",
+                        (elapsed.as_secs_f64() / duration.as_secs_f64()) * 100.0,
+                        remaining.as_secs(),
+                        duration.as_secs());
+                last_update = Instant::now();
+            }
+        }
+
+        // Wait for all connections to finish
+        let results = join_all(handles).await;
+        let total_duration = start_time.elapsed();
+
+        // Analyze results
+        let mut total_packets_sent = 0u64;
+        let mut total_packets_received = 0u64;
+        let mut total_errors = 0u64;
+        let mut connection_failures = 0u64;
+
+        for (conn_id, result) in results.iter().enumerate() {
+            match result {
+                Ok(stats) => {
+                    total_packets_sent += stats.packets_sent;
+                    total_packets_received += stats.packets_received;
+                    total_errors += stats.errors;
+                    if stats.connection_failed {
+                        connection_failures += 1;
+                    }
+                    session.record_event(&format!("connection_{}_stats: sent={}, received={}, errors={}",
+                                                 conn_id, stats.packets_sent, stats.packets_received, stats.errors));
+                }
+                Err(e) => {
+                    connection_failures += 1;
+                    session.record_event(&format!("connection_{}_panic: {}", conn_id, e));
+                }
+            }
+        }
+
+        let success_rate = if total_packets_sent > 0 {
+            (total_packets_received as f64 / total_packets_sent as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        session.record_event(&format!("aging_complete: duration={}s, packets_sent={}, packets_received={}, success_rate={:.2}%, errors={}, conn_failures={}",
+                                     total_duration.as_secs(), total_packets_sent, total_packets_received, success_rate, total_errors, connection_failures));
+
+        if self.verbose {
+            println!("📊 Aging test results:");
+            println!("  Total duration: {:.1}s", total_duration.as_secs_f64());
+            println!("  Packets sent: {}", total_packets_sent);
+            println!("  Packets received: {}", total_packets_received);
+            println!("  Success rate: {:.2}%", success_rate);
+            println!("  Total errors: {}", total_errors);
+            println!("  Connection failures: {}", connection_failures);
+            println!("  Throughput: {:.1} packets/sec", total_packets_sent as f64 / total_duration.as_secs_f64());
+        }
+
+        session.end_test();
+        let result = session.get_result();
+
+        if self.json_output {
+            match result.to_json() {
+                Ok(json) => println!("{}", json),
+                Err(e) => eprintln!("Failed to serialize result to JSON: {}", e),
+            }
+        } else if self.verbose {
+            println!("📊 Test result: {}", result.summary());
+        }
+
+        // Consider test successful if success rate > 95% and no connection failures
+        if success_rate > 95.0 && connection_failures == 0 {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("Aging test failed: success rate {:.2}%, {} connection failures",
+                              success_rate, connection_failures))
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct AgingStats {
+    packets_sent: u64,
+    packets_received: u64,
+    errors: u64,
+    connection_failed: bool,
+}
+
+async fn aging_connection_worker(
+    conn_id: u8,
+    host: &str,
+    port: u16,
+    end_time: Instant,
+    test_data: Vec<u8>,
+    interval: Duration,
+    verbose: bool,
+) -> AgingStats {
+    let mut stats = AgingStats {
+        packets_sent: 0,
+        packets_received: 0,
+        errors: 0,
+        connection_failed: false,
+    };
+
+    // Connect to echo service
+    let mut stream = match TcpStream::connect(format!("{}:{}", host, port)).await {
+        Ok(stream) => {
+            if verbose {
+                println!("✅ Connection {} established to {}:{}", conn_id, host, port);
+            }
+            stream
+        }
+        Err(e) => {
+            if verbose {
+                println!("❌ Connection {} failed: {}", conn_id, e);
+            }
+            stats.connection_failed = true;
+            return stats;
+        }
+    };
+
+    // Send packets until end time
+    while Instant::now() < end_time {
+        // Send test data
+        match stream.write_all(&test_data).await {
+            Ok(_) => {
+                stats.packets_sent += 1;
+
+                // Read echo response
+                let mut buffer = vec![0u8; test_data.len()];
+                match tokio::time::timeout(Duration::from_secs(1), stream.read_exact(&mut buffer)).await {
+                    Ok(Ok(_)) => {
+                        if buffer == test_data {
+                            stats.packets_received += 1;
+                        } else {
+                            stats.errors += 1;
+                            if verbose {
+                                println!("⚠️  Connection {} data corruption detected", conn_id);
+                            }
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        stats.errors += 1;
+                        if verbose {
+                            println!("⚠️  Connection {} read error: {}", conn_id, e);
+                        }
+                    }
+                    Err(_) => {
+                        stats.errors += 1;
+                        if verbose {
+                            println!("⚠️  Connection {} read timeout", conn_id);
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                stats.errors += 1;
+                if verbose {
+                    println!("⚠️  Connection {} write error: {}", conn_id, e);
+                }
+            }
+        }
+
+        // Wait for next iteration
+        tokio::time::sleep(interval).await;
+    }
+
+    if verbose {
+        println!("📋 Connection {} finished: sent={}, received={}, errors={}",
+                conn_id, stats.packets_sent, stats.packets_received, stats.errors);
+    }
+
+    stats
+}
+
+fn create_test_pattern(size: usize) -> Vec<u8> {
+    // Create a repeating pattern for easy verification
+    (0..size).map(|i| (i % 256) as u8).collect()
 }

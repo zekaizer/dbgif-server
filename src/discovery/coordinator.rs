@@ -276,6 +276,7 @@ impl DeviceDiscoveryCoordinator {
                 TransportType::Tcp => tcp_count += 1,
                 TransportType::UsbDevice => usb_device_count += 1,
                 TransportType::UsbBridge => usb_bridge_count += 1,
+                TransportType::Echo => {}, // Echo devices are not counted in discovery stats
             }
         }
 

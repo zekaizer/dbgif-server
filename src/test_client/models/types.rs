@@ -8,6 +8,7 @@ pub enum TestType {
     MultiConnect,
     Protocol,
     Integration,
+    Aging,
 }
 
 impl TestType {
@@ -19,6 +20,7 @@ impl TestType {
             TestType::MultiConnect => "multi_connect",
             TestType::Protocol => "protocol",
             TestType::Integration => "integration",
+            TestType::Aging => "aging",
         }
     }
 
@@ -30,6 +32,7 @@ impl TestType {
             TestType::MultiConnect => "Multi-connection test",
             TestType::Protocol => "Protocol behavior test",
             TestType::Integration => "Integration test",
+            TestType::Aging => "Aging test for long-duration stability",
         }
     }
 }
