@@ -1,11 +1,24 @@
+pub mod config;
+pub mod contract;
+pub mod daemon;
+pub mod discovery;
+pub mod logging;
 pub mod protocol;
 pub mod server;
 pub mod services;
+pub mod session;
+pub mod shutdown;
 pub mod transport;
 pub mod utils;
 
+pub use config::*;
+pub use daemon::*;
+pub use discovery::*;
+pub use logging::*;
 pub use protocol::*;
 pub use server::*;
 pub use services::*;
+pub use session::*;
+pub use shutdown::*;
 pub use transport::*;
 pub use utils::*;

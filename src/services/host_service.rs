@@ -51,21 +51,20 @@ impl HostService {
 
         let device_count = transport_info.len();
 
-        for (device_id, (transport_type, is_connected)) in transport_info {
-            let status = if is_connected { "device" } else { "offline" };
+        for transport_info in transport_info {
+            let status = if transport_info.is_connected { "device" } else { "offline" };
 
             if long_format {
                 // Format: serial status transport_info
-                let transport_info = match transport_type {
+                let transport_type_str = match transport_info.transport_type {
                     TransportType::Tcp => "tcp",
-                    TransportType::AndroidUsb => "usb",
-                    TransportType::BridgeUsb => "bridge_usb",
-                    TransportType::Loopback => "loopback",
+                    TransportType::UsbDevice => "usb",
+                    TransportType::UsbBridge => "bridge_usb",
                 };
-                output.push_str(&format!("{}\t{}\t{}\n", device_id, status, transport_info));
+                output.push_str(&format!("{}\t{}\t{}\n", transport_info.device_id, status, transport_type_str));
             } else {
                 // Format: serial status
-                output.push_str(&format!("{}\t{}\n", device_id, status));
+                output.push_str(&format!("{}\t{}\n", transport_info.device_id, status));
             }
         }
 
@@ -80,8 +79,8 @@ impl HostService {
         let transport_info = self.transport_manager.get_transport_info(device_id).await;
 
         match transport_info {
-            Some((_, is_connected)) => {
-                if is_connected {
+            Some(info) => {
+                if info.is_connected {
                     info!("Selected device: {}", device_id);
                     Ok(HostServiceResponse::TransportSelected(
                         device_id.to_string(),
@@ -103,10 +102,10 @@ impl HostService {
         let transport_ids = self.transport_manager.get_transport_ids().await;
 
         for device_id in transport_ids {
-            if let Some((_, is_connected)) =
+            if let Some(transport_info) =
                 self.transport_manager.get_transport_info(&device_id).await
             {
-                if is_connected {
+                if transport_info.is_connected {
                     info!("Selected any available device: {}", device_id);
                     return Ok(HostServiceResponse::TransportSelected(device_id));
                 }

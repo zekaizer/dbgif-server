@@ -2,121 +2,73 @@ use anyhow::Result;
 use async_trait::async_trait;
 use std::fmt;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TransportType {
     Tcp,
-    AndroidUsb,
-    BridgeUsb,
-    Loopback,
+    UsbDevice,
+    UsbBridge,
 }
 
 impl fmt::Display for TransportType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             TransportType::Tcp => write!(f, "TCP"),
-            TransportType::AndroidUsb => write!(f, "Android USB"),
-            TransportType::BridgeUsb => write!(f, "Bridge USB"),
-            TransportType::Loopback => write!(f, "Loopback"),
+            TransportType::UsbDevice => write!(f, "USB Device"),
+            TransportType::UsbBridge => write!(f, "USB Bridge"),
         }
     }
 }
 
-/// Connection status for transport layer
-/// 
-/// This enum defines the lifecycle states of transport connections:
-/// - Physical connections (USB cables, TCP sockets) 
-/// - Logical connections (protocol handshakes, remote readiness)
-#[derive(Debug, Clone, PartialEq)]
-pub enum ConnectionStatus {
-    /// Transport is physically disconnected or unavailable
-    /// - USB device unplugged
-    /// - TCP connection closed
-    /// - No communication possible
-    Disconnected,
-    
-    /// Transport has physical connection but requires logical connection
-    /// - USB device connected but remote side not ready
-    /// - Bridge cable connected on one side only
-    /// - Requires continuous polling until Ready
-    Connected,
-    
-    /// Transport is fully ready for bi-directional communication
-    /// - TCP connection established
-    /// - USB device ready for ADB protocol
-    /// - Bridge cable connected on both sides
-    Ready,
-    
-    /// Transport encountered an error during connection attempt
-    /// Contains error description for debugging
-    Error(String),
+#[derive(Debug, Clone)]
+pub enum ConnectionInfo {
+    Tcp { host: String, port: u16 },
+    UsbDevice { vid: u16, pid: u16, serial: String, path: String },
+    UsbBridge { vid: u16, pid: u16, serial: String, path: String, bridge_status: String },
 }
 
-impl fmt::Display for ConnectionStatus {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ConnectionStatus::Disconnected => write!(f, "Disconnected"),
-            ConnectionStatus::Connected => write!(f, "Connected"),
-            ConnectionStatus::Ready => write!(f, "Ready"),
-            ConnectionStatus::Error(err) => write!(f, "Error: {}", err),
-        }
-    }
+#[derive(Debug, Clone)]
+pub struct DeviceInfo {
+    pub device_id: String,
+    pub display_name: String,
+    pub transport_type: TransportType,
+    pub connection_info: ConnectionInfo,
+    pub capabilities: Vec<String>,
 }
 
 #[async_trait]
 pub trait Transport: Send + Sync {
+    async fn connect(&mut self) -> Result<()>;
     async fn send(&mut self, data: &[u8]) -> Result<()>;
-    async fn receive(&mut self, buffer_size: usize) -> Result<Vec<u8>>;
-
-    /// Attempt to establish connection and return current status
-    /// 
-    /// Return values determine polling behavior:
-    /// - `Ready`: Transport immediately usable, no polling needed
-    /// - `Connected`: Transport needs logical connection, continuous polling started
-    /// - `Disconnected`: Physical connection missing
-    /// - `Error`: Connection attempt failed
-    async fn connect(&mut self) -> Result<ConnectionStatus>;
+    async fn receive(&mut self, buffer: &mut [u8]) -> Result<usize>;
     async fn disconnect(&mut self) -> Result<()>;
-    async fn is_connected(&self) -> bool;
-
-    fn device_id(&self) -> &str;
+    fn is_connected(&self) -> bool;
     fn transport_type(&self) -> TransportType;
-
-    async fn health_check(&self) -> Result<()> {
-        if self.is_connected().await {
-            Ok(())
-        } else {
-            Err(anyhow::anyhow!("Transport is not connected"))
-        }
-    }
-
-    /// Get current real-time connection status
-    /// 
-    /// Used by TransportManager for continuous polling of Connected transports.
-    /// Default implementation uses is_connected() for simple Ready/Disconnected check.
-    /// Override for more sophisticated state detection (e.g., Bridge USB vendor commands).
-    async fn get_connection_status(&self) -> ConnectionStatus {
-        if self.is_connected().await {
-            ConnectionStatus::Ready
-        } else {
-            ConnectionStatus::Disconnected
-        }
-    }
+    fn device_id(&self) -> String;
+    fn display_name(&self) -> String;
+    fn max_transfer_size(&self) -> usize;
+    fn is_bidirectional(&self) -> bool { true }
+    fn connection_info(&self) -> ConnectionInfo;
 }
 
-pub mod android_usb;
-pub mod bridge_usb;
-pub mod debug;
-pub mod loopback;
-pub mod manager;
-pub mod tcp;
-pub mod usb_common;
-pub mod usb_monitor;
+#[async_trait]
+pub trait TransportFactory: Send + Sync {
+    async fn discover_devices(&self) -> Result<Vec<DeviceInfo>>;
+    async fn create_transport(&self, device_info: &DeviceInfo) -> Result<Box<dyn Transport>>;
+    fn transport_type(&self) -> TransportType;
+    fn factory_name(&self) -> String;
+    fn is_available(&self) -> bool;
+}
 
-pub use android_usb::*;
-pub use bridge_usb::*;
-pub use debug::{is_debug_env_enabled, DebugTransport};
-pub use loopback::*;
+pub mod mock_transport;
+pub mod tcp_transport;
+pub mod usb_device_transport;
+pub mod usb_bridge_transport;
+
+pub use mock_transport::*;
+pub use tcp_transport::*;
+pub use usb_device_transport::*;
+pub use usb_bridge_transport::*;
+
+pub mod manager;
+
 pub use manager::*;
-pub use tcp::*;
-pub use usb_common::*;
-pub use usb_monitor::*;
