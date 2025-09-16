@@ -1,6 +1,5 @@
 use async_trait::async_trait;
-use crate::protocol::error::{ProtocolError, ProtocolResult};
-use crate::protocol::message::AdbMessage;
+use crate::transport::connection::{TransportError, TransportResult};
 use crate::transport::{TransportConfig};
 use crate::transport::connection::{Connection, ConnectionStats, ConnectionMetadata, ConnectionOptions, ConnectionFeature};
 use std::net::SocketAddr;
@@ -20,13 +19,13 @@ pub struct TcpConnection {
 
 impl TcpConnection {
     /// Create a new TCP connection
-    pub fn new(stream: TcpStream, config: TransportConfig) -> ProtocolResult<Self> {
+    pub fn new(stream: TcpStream, config: TransportConfig) -> TransportResult<Self> {
         let local_addr = stream.local_addr().map_err(|e| {
-            ProtocolError::TransportError(format!("Failed to get local address: {}", e))
+            TransportError::Other { message: format!("Failed to get local address: {}", e) }
         })?;
 
         let remote_addr = stream.peer_addr().map_err(|e| {
-            ProtocolError::TransportError(format!("Failed to get remote address: {}", e))
+            TransportError::Other { message: format!("Failed to get remote address: {}", e) }
         })?;
 
         let mut metadata = ConnectionMetadata::new("tcp");
@@ -66,7 +65,7 @@ impl TcpConnection {
     }
 
     /// Create a new TCP connection from an existing stream with default config
-    pub fn from_stream(stream: TcpStream) -> ProtocolResult<Self> {
+    pub fn from_stream(stream: TcpStream) -> TransportResult<Self> {
         Self::new(stream, TransportConfig::default())
     }
 
@@ -82,7 +81,7 @@ impl TcpConnection {
     }
 
     /// Configure TCP socket options
-    pub fn configure_socket(&self, options: &[TcpSocketOption]) -> ProtocolResult<()> {
+    pub fn configure_socket(&self, options: &[TcpSocketOption]) -> TransportResult<()> {
         for option in options {
             match option {
                 TcpSocketOption::NoDelay => {
@@ -120,39 +119,39 @@ pub enum TcpSocketOption {
 
 #[async_trait]
 impl Connection for TcpConnection {
-    async fn send_bytes(&mut self, data: &[u8]) -> ProtocolResult<()> {
+    async fn send_bytes(&mut self, data: &[u8]) -> TransportResult<()> {
         if self.closed {
-            return Err(ProtocolError::ConnectionClosed);
+            return Err(TransportError::ConnectionClosed);
         }
 
         use tokio::io::AsyncWriteExt;
 
         let write_result = if let Some(timeout) = self.options.write_timeout {
             tokio::time::timeout(timeout, self.stream.write_all(data)).await
-                .map_err(|_| ProtocolError::Timeout { timeout_ms: timeout.as_millis() as u64 })?
+                .map_err(|_| TransportError::Timeout { timeout_ms: timeout.as_millis() as u64 })?
         } else {
             self.stream.write_all(data).await
         };
 
         write_result.map_err(|e| {
             self.stats.record_error();
-            ProtocolError::IoError(e)
+            TransportError::IoError(e)
         })?;
 
         self.stats.record_bytes_sent(data.len() as u64);
         Ok(())
     }
 
-    async fn receive_bytes(&mut self, buffer: &mut [u8]) -> ProtocolResult<Option<usize>> {
+    async fn receive_bytes(&mut self, buffer: &mut [u8]) -> TransportResult<Option<usize>> {
         if self.closed {
-            return Err(ProtocolError::ConnectionClosed);
+            return Err(TransportError::ConnectionClosed);
         }
 
         use tokio::io::AsyncReadExt;
 
         let read_result = if let Some(timeout) = self.options.read_timeout {
             tokio::time::timeout(timeout, self.stream.read(buffer)).await
-                .map_err(|_| ProtocolError::Timeout { timeout_ms: timeout.as_millis() as u64 })?
+                .map_err(|_| TransportError::Timeout { timeout_ms: timeout.as_millis() as u64 })?
         } else {
             self.stream.read(buffer).await
         };
@@ -169,68 +168,13 @@ impl Connection for TcpConnection {
             }
             Err(e) => {
                 self.stats.record_error();
-                Err(ProtocolError::IoError(e))
+                Err(TransportError::IoError(e))
             }
         }
     }
 
-    async fn receive_message(&mut self) -> ProtocolResult<Option<AdbMessage>> {
-        // Read the 24-byte header first
-        let mut header_buf = [0u8; 24];
-        let mut bytes_read = 0;
 
-        while bytes_read < 24 {
-            match self.receive_bytes(&mut header_buf[bytes_read..]).await? {
-                Some(n) => bytes_read += n,
-                None => return Ok(None), // Connection closed
-            }
-        }
-
-        // Parse header to get data length
-        let data_length = u32::from_le_bytes([
-            header_buf[12], header_buf[13], header_buf[14], header_buf[15]
-        ]);
-
-        // Check data size limit
-        if data_length as usize > self.options.max_message_size {
-            return Err(ProtocolError::DataSizeExceeded {
-                size: data_length as usize,
-                max_size: self.options.max_message_size,
-            });
-        }
-
-        // Read data payload if present
-        let mut data = Vec::new();
-        if data_length > 0 {
-            data.resize(data_length as usize, 0);
-            let mut bytes_read = 0;
-
-            while bytes_read < data_length as usize {
-                match self.receive_bytes(&mut data[bytes_read..]).await? {
-                    Some(n) => bytes_read += n,
-                    None => {
-                        return Err(ProtocolError::ConnectionClosed);
-                    }
-                }
-            }
-        }
-
-        // Construct complete message buffer
-        let mut message_buf = Vec::with_capacity(24 + data.len());
-        message_buf.extend_from_slice(&header_buf);
-        message_buf.extend_from_slice(&data);
-
-        // Deserialize the message
-        match AdbMessage::deserialize(&message_buf) {
-            Ok(message) => {
-                self.stats.record_message_received();
-                Ok(Some(message))
-            }
-            Err(e) => Err(ProtocolError::from(e)),
-        }
-    }
-
-    async fn send_bytes_timeout(&mut self, data: &[u8], timeout: Duration) -> ProtocolResult<()> {
+    async fn send_bytes_timeout(&mut self, data: &[u8], timeout: Duration) -> TransportResult<()> {
         let original_timeout = self.options.write_timeout;
         self.options.write_timeout = Some(timeout);
         let result = self.send_bytes(data).await;
@@ -238,7 +182,7 @@ impl Connection for TcpConnection {
         result
     }
 
-    async fn receive_bytes_timeout(&mut self, buffer: &mut [u8], timeout: Duration) -> ProtocolResult<Option<usize>> {
+    async fn receive_bytes_timeout(&mut self, buffer: &mut [u8], timeout: Duration) -> TransportResult<Option<usize>> {
         let original_timeout = self.options.read_timeout;
         self.options.read_timeout = Some(timeout);
         let result = self.receive_bytes(buffer).await;
@@ -246,7 +190,7 @@ impl Connection for TcpConnection {
         result
     }
 
-    async fn close(&mut self) -> ProtocolResult<()> {
+    async fn close(&mut self) -> TransportResult<()> {
         if !self.closed {
             use tokio::io::AsyncWriteExt;
             let _ = self.stream.shutdown().await;
@@ -255,7 +199,7 @@ impl Connection for TcpConnection {
         Ok(())
     }
 
-    async fn shutdown(&mut self) -> ProtocolResult<()> {
+    async fn shutdown(&mut self) -> TransportResult<()> {
         self.close().await
     }
 
@@ -263,15 +207,15 @@ impl Connection for TcpConnection {
         !self.closed
     }
 
-    fn local_addr(&self) -> ProtocolResult<SocketAddr> {
+    fn local_addr(&self) -> TransportResult<SocketAddr> {
         self.stream.local_addr().map_err(|e| {
-            ProtocolError::TransportError(format!("Failed to get local address: {}", e))
+            TransportError::Other { message: format!("Failed to get local address: {}", e) }
         })
     }
 
-    fn remote_addr(&self) -> ProtocolResult<SocketAddr> {
+    fn remote_addr(&self) -> TransportResult<SocketAddr> {
         self.stream.peer_addr().map_err(|e| {
-            ProtocolError::TransportError(format!("Failed to get remote address: {}", e))
+            TransportError::Other { message: format!("Failed to get remote address: {}", e) }
         })
     }
 
@@ -289,7 +233,7 @@ impl Connection for TcpConnection {
         self.metadata.clone()
     }
 
-    async fn set_options(&mut self, options: ConnectionOptions) -> ProtocolResult<()> {
+    async fn set_options(&mut self, options: ConnectionOptions) -> TransportResult<()> {
         self.options = options;
 
         // Apply TCP-specific options
@@ -304,11 +248,11 @@ impl Connection for TcpConnection {
         self.options.clone()
     }
 
-    async fn flush(&mut self) -> ProtocolResult<()> {
+    async fn flush(&mut self) -> TransportResult<()> {
         use tokio::io::AsyncWriteExt;
         self.stream.flush().await.map_err(|e| {
             self.stats.record_error();
-            ProtocolError::IoError(e)
+            TransportError::IoError(e)
         })
     }
 
@@ -333,7 +277,7 @@ mod tests {
     use super::*;
     use tokio::net::{TcpListener, TcpStream};
 
-    async fn create_test_connection_pair() -> ProtocolResult<(TcpConnection, TcpConnection)> {
+    async fn create_test_connection_pair() -> TransportResult<(TcpConnection, TcpConnection)> {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 

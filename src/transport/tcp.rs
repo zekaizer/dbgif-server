@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use crate::protocol::error::{ProtocolError, ProtocolResult};
+use crate::transport::connection::{TransportError, TransportResult};
 use crate::transport::{Transport, TransportListener, TransportConfig, TransportStats};
 use crate::transport::tcp_connection::TcpConnection;
 use std::net::SocketAddr;
@@ -51,9 +51,9 @@ impl Default for TcpTransport {
 impl Transport for TcpTransport {
     type Connection = TcpConnection;
 
-    async fn listen(&self, addr: SocketAddr) -> ProtocolResult<Box<dyn TransportListener<Connection = Self::Connection>>> {
+    async fn listen(&self, addr: SocketAddr) -> TransportResult<Box<dyn TransportListener<Connection = Self::Connection>>> {
         let listener = TcpListener::bind(addr).await.map_err(|e| {
-            ProtocolError::TransportError(format!("Failed to bind TCP listener to {}: {}", addr, e))
+            TransportError::Other { message: format!("Failed to bind TCP listener to {}: {}", addr, e) }
         })?;
 
         // Update stats
@@ -69,15 +69,15 @@ impl Transport for TcpTransport {
         }))
     }
 
-    async fn connect(&self, addr: SocketAddr) -> ProtocolResult<Self::Connection> {
+    async fn connect(&self, addr: SocketAddr) -> TransportResult<Self::Connection> {
         self.connect_timeout(addr, self.config.connect_timeout).await
     }
 
-    async fn connect_timeout(&self, addr: SocketAddr, timeout: Duration) -> ProtocolResult<Self::Connection> {
+    async fn connect_timeout(&self, addr: SocketAddr, timeout: Duration) -> TransportResult<Self::Connection> {
         let stream = tokio::time::timeout(timeout, TcpStream::connect(addr))
             .await
-            .map_err(|_| ProtocolError::Timeout { timeout_ms: timeout.as_millis() as u64 })?
-            .map_err(|e| ProtocolError::TransportError(format!("Failed to connect to {}: {}", addr, e)))?;
+            .map_err(|_| TransportError::Timeout { timeout_ms: timeout.as_millis() as u64 })?
+            .map_err(|e| TransportError::Other { message: format!("Failed to connect to {}: {}", addr, e) })?;
 
         // Configure socket options
         if self.config.tcp_nodelay {
@@ -125,9 +125,9 @@ pub struct TcpTransportListener {
 impl TransportListener for TcpTransportListener {
     type Connection = TcpConnection;
 
-    async fn accept(&mut self) -> ProtocolResult<(Self::Connection, SocketAddr)> {
+    async fn accept(&mut self) -> TransportResult<(Self::Connection, SocketAddr)> {
         let (stream, addr) = self.listener.accept().await.map_err(|e| {
-            ProtocolError::TransportError(format!("Failed to accept TCP connection: {}", e))
+            TransportError::Other { message: format!("Failed to accept TCP connection: {}", e) }
         })?;
 
         // Configure socket options
@@ -147,13 +147,13 @@ impl TransportListener for TcpTransportListener {
         Ok((connection, addr))
     }
 
-    fn local_addr(&self) -> ProtocolResult<SocketAddr> {
+    fn local_addr(&self) -> TransportResult<SocketAddr> {
         self.listener.local_addr().map_err(|e| {
-            ProtocolError::TransportError(format!("Failed to get local address: {}", e))
+            TransportError::Other { message: format!("Failed to get local address: {}", e) }
         })
     }
 
-    async fn close(&mut self) -> ProtocolResult<()> {
+    async fn close(&mut self) -> TransportResult<()> {
         // TcpListener doesn't have an explicit close method
         // Dropping it will close the socket
         Ok(())

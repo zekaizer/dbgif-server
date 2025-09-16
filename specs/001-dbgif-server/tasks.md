@@ -62,7 +62,7 @@
 - [x] T016 [P] Performance test: 100 connections in tests/integration/test_performance.rs
 
 ## Phase 3.3: Core Implementation (ONLY after tests are failing)
-- [x] T017 [P] AdbMessage struct with serialization in src/protocol/message.rs
+- [x] T017 [P] AdbMessage struct with serialization and helper methods (new_ping, new_pong) in src/protocol/message.rs
 - [x] T018 [P] AdbCommand enum with constants in src/protocol/commands.rs
 - [x] T019 [P] CRC32 validation implementation in src/protocol/crc.rs
 - [x] T020 [P] ProtocolError types in src/protocol/error.rs

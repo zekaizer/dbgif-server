@@ -188,4 +188,32 @@ impl AdbMessage {
     pub const fn header_size() -> usize {
         24
     }
+
+    /// Create a PING message for keep-alive
+    pub fn new_ping() -> Self {
+        let command = crate::protocol::commands::AdbCommand::PING as u32;
+        Self {
+            command,
+            arg0: 0,
+            arg1: 0,
+            data_length: 0,
+            data_crc32: 0,
+            magic: !command,
+            data: Vec::new(),
+        }
+    }
+
+    /// Create a PONG response message
+    pub fn new_pong() -> Self {
+        let command = crate::protocol::commands::AdbCommand::PONG as u32;
+        Self {
+            command,
+            arg0: 0,
+            arg1: 0,
+            data_length: 0,
+            data_crc32: 0,
+            magic: !command,
+            data: Vec::new(),
+        }
+    }
 }

@@ -3,7 +3,7 @@ pub mod tcp;
 pub mod tcp_connection;
 
 use async_trait::async_trait;
-use crate::protocol::error::ProtocolResult;
+use crate::transport::connection::TransportResult;
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -19,13 +19,13 @@ pub trait Transport: Send + Sync {
     type Connection: Connection;
 
     /// Start listening for incoming connections on the specified address
-    async fn listen(&self, addr: SocketAddr) -> ProtocolResult<Box<dyn TransportListener<Connection = Self::Connection>>>;
+    async fn listen(&self, addr: SocketAddr) -> TransportResult<Box<dyn TransportListener<Connection = Self::Connection>>>;
 
     /// Connect to a remote address (for client-side connections)
-    async fn connect(&self, addr: SocketAddr) -> ProtocolResult<Self::Connection>;
+    async fn connect(&self, addr: SocketAddr) -> TransportResult<Self::Connection>;
 
     /// Connect with timeout
-    async fn connect_timeout(&self, addr: SocketAddr, timeout: Duration) -> ProtocolResult<Self::Connection>;
+    async fn connect_timeout(&self, addr: SocketAddr, timeout: Duration) -> TransportResult<Self::Connection>;
 
     /// Get the transport type name for logging
     fn transport_type(&self) -> &'static str;
@@ -47,13 +47,13 @@ pub trait TransportListener: Send + Sync {
     type Connection: Connection;
 
     /// Accept a new incoming connection
-    async fn accept(&mut self) -> ProtocolResult<(Self::Connection, SocketAddr)>;
+    async fn accept(&mut self) -> TransportResult<(Self::Connection, SocketAddr)>;
 
     /// Get the local address this listener is bound to
-    fn local_addr(&self) -> ProtocolResult<SocketAddr>;
+    fn local_addr(&self) -> TransportResult<SocketAddr>;
 
     /// Close the listener
-    async fn close(&mut self) -> ProtocolResult<()>;
+    async fn close(&mut self) -> TransportResult<()>;
 
     /// Check if the listener is still active
     fn is_active(&self) -> bool;

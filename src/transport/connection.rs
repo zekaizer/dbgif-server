@@ -1,41 +1,58 @@
 use async_trait::async_trait;
-use crate::protocol::error::{ProtocolError, ProtocolResult};
-use crate::protocol::message::AdbMessage;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
+use thiserror::Error;
+
+/// Transport layer errors
+#[derive(Error, Debug)]
+pub enum TransportError {
+    #[error("IO error: {0}")]
+    IoError(#[from] std::io::Error),
+
+    #[error("Connection timeout: operation took longer than {timeout_ms}ms")]
+    Timeout { timeout_ms: u64 },
+
+    #[error("Connection closed unexpectedly")]
+    ConnectionClosed,
+
+    #[error("Transport error: {message}")]
+    Other { message: String },
+
+    #[error("Invalid address: {address}")]
+    InvalidAddress { address: String },
+
+    #[error("Connection failed: {reason}")]
+    ConnectionFailed { reason: String },
+
+    #[error("Data size exceeded: {size} bytes (max: {max_size})")]
+    DataSizeExceeded { size: usize, max_size: usize },
+}
+
+/// Result type for transport operations
+pub type TransportResult<T> = Result<T, TransportError>;
 
 /// Connection abstraction for different transport types
-/// Provides async read/write operations with ADB message framing
+/// Provides async read/write operations at byte level
 #[async_trait]
 pub trait Connection: Send + Sync {
     /// Send raw bytes over the connection
-    async fn send_bytes(&mut self, data: &[u8]) -> ProtocolResult<()>;
+    async fn send_bytes(&mut self, data: &[u8]) -> TransportResult<()>;
 
     /// Receive raw bytes from the connection
     /// Returns None if connection is closed gracefully
-    async fn receive_bytes(&mut self, buffer: &mut [u8]) -> ProtocolResult<Option<usize>>;
-
-    /// Send a complete ADB message
-    async fn send_message(&mut self, message: &AdbMessage) -> ProtocolResult<()> {
-        let serialized = message.serialize();
-        self.send_bytes(&serialized).await
-    }
-
-    /// Receive a complete ADB message
-    /// Handles message framing and deserialization
-    async fn receive_message(&mut self) -> ProtocolResult<Option<AdbMessage>>;
+    async fn receive_bytes(&mut self, buffer: &mut [u8]) -> TransportResult<Option<usize>>;
 
     /// Send bytes with timeout
-    async fn send_bytes_timeout(&mut self, data: &[u8], timeout: Duration) -> ProtocolResult<()>;
+    async fn send_bytes_timeout(&mut self, data: &[u8], timeout: Duration) -> TransportResult<()>;
 
     /// Receive bytes with timeout
-    async fn receive_bytes_timeout(&mut self, buffer: &mut [u8], timeout: Duration) -> ProtocolResult<Option<usize>>;
+    async fn receive_bytes_timeout(&mut self, buffer: &mut [u8], timeout: Duration) -> TransportResult<Option<usize>>;
 
     /// Close the connection gracefully
-    async fn close(&mut self) -> ProtocolResult<()>;
+    async fn close(&mut self) -> TransportResult<()>;
 
     /// Forcefully shutdown the connection
-    async fn shutdown(&mut self) -> ProtocolResult<()>;
+    async fn shutdown(&mut self) -> TransportResult<()>;
 
     /// Check if the connection is still active
     fn is_connected(&self) -> bool;
@@ -46,10 +63,10 @@ pub trait Connection: Send + Sync {
     }
 
     /// Get local socket address
-    fn local_addr(&self) -> ProtocolResult<SocketAddr>;
+    fn local_addr(&self) -> TransportResult<SocketAddr>;
 
     /// Get remote socket address
-    fn remote_addr(&self) -> ProtocolResult<SocketAddr>;
+    fn remote_addr(&self) -> TransportResult<SocketAddr>;
 
     /// Get connection statistics
     fn stats(&self) -> ConnectionStats;
@@ -61,29 +78,13 @@ pub trait Connection: Send + Sync {
     fn metadata(&self) -> ConnectionMetadata;
 
     /// Set connection options
-    async fn set_options(&mut self, options: ConnectionOptions) -> ProtocolResult<()>;
+    async fn set_options(&mut self, options: ConnectionOptions) -> TransportResult<()>;
 
     /// Get current connection options
     fn get_options(&self) -> ConnectionOptions;
 
-    /// Ping the connection (send keep-alive)
-    async fn ping(&mut self) -> ProtocolResult<Duration> {
-        let start = Instant::now();
-        let ping_msg = AdbMessage::new_ping();
-        self.send_message(&ping_msg).await?;
-
-        // Wait for PONG response
-        if let Some(response) = self.receive_message().await? {
-            if response.command == crate::protocol::commands::AdbCommand::PONG as u32 {
-                return Ok(start.elapsed());
-            }
-        }
-
-        Err(ProtocolError::Timeout { timeout_ms: 5000 })
-    }
-
     /// Flush any pending write buffers
-    async fn flush(&mut self) -> ProtocolResult<()>;
+    async fn flush(&mut self) -> TransportResult<()>;
 
     /// Get the maximum message size for this connection
     fn max_message_size(&self) -> usize;
@@ -287,33 +288,3 @@ pub enum ConnectionFeature {
     GracefulShutdown,
 }
 
-/// Helper trait for ADB message creation
-impl AdbMessage {
-    /// Create a PING message for keep-alive
-    pub fn new_ping() -> Self {
-        let command = crate::protocol::commands::AdbCommand::PING as u32;
-        Self {
-            command,
-            arg0: 0,
-            arg1: 0,
-            data_length: 0,
-            data_crc32: 0,
-            magic: !command,
-            data: Vec::new(),
-        }
-    }
-
-    /// Create a PONG response message
-    pub fn new_pong() -> Self {
-        let command = crate::protocol::commands::AdbCommand::PONG as u32;
-        Self {
-            command,
-            arg0: 0,
-            arg1: 0,
-            data_length: 0,
-            data_crc32: 0,
-            magic: !command,
-            data: Vec::new(),
-        }
-    }
-}
