@@ -93,9 +93,9 @@
 - [x] T043 Error handling and graceful shutdown in src/server/shutdown.rs
 
 ## Phase 3.5: Integration
-- [ ] T044 Wire up host services to server in src/server/mod.rs
-- [ ] T045 Implement protocol message handling in src/server/message_handler.rs
-- [ ] T046 Add connection limits and backpressure in src/server/limits.rs
+- [x] T044 Wire up host services to server in src/server/mod.rs
+- [x] T045 Implement protocol message handling in src/server/message_handler.rs
+- [x] T046 Add connection limits and backpressure in src/server/limits.rs
 - [ ] T047 Implement PING/PONG heartbeat in src/server/heartbeat.rs
 - [ ] T048 Device discovery background task in src/server/discovery.rs
 
