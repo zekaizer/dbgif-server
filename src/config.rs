@@ -556,9 +556,55 @@ impl SecurityConfig {
             }
         }
 
-        // TODO: Add CIDR validation for allowed_clients and denied_clients
+        // Validate CIDR notation for allowed and denied clients
+        for addr in &self.allowed_clients {
+            if !addr.is_empty() && !Self::validate_cidr_notation(addr) {
+                return Err(ConfigError::Validation {
+                    message: format!("Invalid CIDR notation in allowed_clients: {}", addr),
+                });
+            }
+        }
+
+        for addr in &self.denied_clients {
+            if !addr.is_empty() && !Self::validate_cidr_notation(addr) {
+                return Err(ConfigError::Validation {
+                    message: format!("Invalid CIDR notation in denied_clients: {}", addr),
+                });
+            }
+        }
 
         Ok(())
+    }
+
+    /// Validate CIDR notation
+    fn validate_cidr_notation(addr: &str) -> bool {
+        // Basic CIDR validation - accepts IP addresses with optional /prefix
+        if addr.contains('/') {
+            let parts: Vec<&str> = addr.split('/').collect();
+            if parts.len() != 2 {
+                return false;
+            }
+
+            // Validate IP part
+            if parts[0].parse::<std::net::IpAddr>().is_err() {
+                return false;
+            }
+
+            // Validate prefix part
+            if let Ok(prefix) = parts[1].parse::<u8>() {
+                // IPv4: 0-32, IPv6: 0-128
+                if parts[0].contains(':') {
+                    prefix <= 128 // IPv6
+                } else {
+                    prefix <= 32 // IPv4
+                }
+            } else {
+                false
+            }
+        } else {
+            // Just an IP address without prefix
+            addr.parse::<std::net::IpAddr>().is_ok()
+        }
     }
 }
 

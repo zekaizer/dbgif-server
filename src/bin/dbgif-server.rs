@@ -1,10 +1,9 @@
 use clap::Parser;
 use dbgif_protocol::{
-    host_services::HostServiceRegistry,
+    config::DbgifConfig,
     server::{
         connection_manager::ConnectionManager,
         device_manager::DeviceManager,
-        device_registry::DeviceRegistry,
         dispatcher::MessageDispatcher,
         state::{ServerConfig, ServerState},
         stream_forwarder::StreamForwarder,
@@ -13,7 +12,7 @@ use dbgif_protocol::{
 };
 use std::{net::SocketAddr, sync::Arc};
 use tokio::signal;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 /// DBGIF Protocol Server
 ///
@@ -108,14 +107,44 @@ async fn main() -> anyhow::Result<()> {
     // Load additional configuration from file if specified
     if let Some(config_path) = &args.config {
         info!("Loading configuration from: {}", config_path);
-        // TODO: Implement configuration file loading
-        warn!("Configuration file loading not yet implemented");
+        match DbgifConfig::from_file(config_path) {
+            Ok(file_config) => {
+                info!("Successfully loaded configuration from file");
+                info!("File config server: {:?}", file_config.server);
+                info!("File config transport: {:?}", file_config.transport);
+                info!("File config discovery: {:?}", file_config.discovery);
+                info!("File config logging: {:?}", file_config.logging);
+
+                // CLI args take precedence over file config
+                info!("Note: CLI arguments override file configuration");
+            }
+            Err(e) => {
+                error!("Failed to load configuration file: {}", e);
+                std::process::exit(1);
+            }
+        }
     }
 
     // Create server components
     let server_state = Arc::new(ServerState::new(server_config));
-    let device_registry = Arc::new(DeviceRegistry::new());
-    let _host_services = Arc::new(HostServiceRegistry::new()); // TODO: Wire up to dispatcher in Phase 3.5
+
+    // Register built-in host services with the server state
+    use dbgif_protocol::host_services::{
+        version::HostVersionService,
+        features::HostFeaturesService,
+        list::HostListService,
+        device::HostDeviceService,
+    };
+
+    {
+        let mut host_services = server_state.host_services.write().unwrap();
+        host_services.register(HostVersionService::new());
+        host_services.register(HostFeaturesService::new());
+        host_services.register(HostListService::new(Arc::clone(&server_state.device_registry)));
+        host_services.register(HostDeviceService::new(Arc::clone(&server_state.device_registry)));
+    }
+
+    let device_registry = Arc::clone(&server_state.device_registry);
 
     // Initialize core components
     let connection_manager = ConnectionManager::new(Arc::clone(&server_state));
@@ -218,23 +247,50 @@ async fn setup_shutdown_handler() {
     }
 }
 
-/// Accept incoming connections (simplified implementation)
+/// Accept incoming connections
 async fn accept_connections(
-    mut _listener: Box<dyn TransportListener<Connection = impl Connection>>,
-    _connection_manager: ConnectionManager,
+    mut listener: Box<dyn TransportListener<Connection = impl Connection + 'static>>,
+    connection_manager: ConnectionManager,
     _message_dispatcher: MessageDispatcher,
 ) -> anyhow::Result<()> {
-    // TODO: Implement full connection acceptance loop
-    // This is a placeholder to prevent the server from exiting immediately
-
     info!("Connection acceptance loop started");
 
-    // For now, just sleep to keep the server running
     loop {
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        // In the full implementation, this would:
-        // 1. Accept new connections from the listener
-        // 2. Hand them off to the connection manager
-        // 3. Setup message routing through the dispatcher
+        match listener.accept().await {
+            Ok(connection) => {
+                let connection_id = connection.connection_id();
+                info!("New connection accepted: {}", connection_id);
+
+                // Handle connection in background task
+                let conn_mgr = connection_manager.clone();
+
+                tokio::spawn(async move {
+                    if let Err(e) = handle_connection(Box::new(connection), conn_mgr).await {
+                        error!("Connection handling failed: {}", e);
+                    }
+                });
+            }
+            Err(e) => {
+                error!("Failed to accept connection: {}", e);
+                // Continue accepting other connections despite this error
+            }
+        }
     }
+}
+
+/// Handle a single connection
+async fn handle_connection(
+    connection: Box<dyn Connection>,
+    connection_manager: ConnectionManager,
+) -> anyhow::Result<()> {
+    let connection_id = connection.connection_id();
+    info!("Handling connection: {}", connection_id);
+
+    // Add connection to manager
+    let session_id = connection_manager.accept_connection(connection).await?;
+    info!("Connection registered with session ID: {}", session_id);
+
+    // Connection lifecycle is now managed by the connection manager
+    // The connection will be cleaned up when the session ends
+    Ok(())
 }

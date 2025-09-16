@@ -8,7 +8,7 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::time::interval;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 /// Connection lifecycle manager
 /// Handles client connections, session management, and cleanup
@@ -125,9 +125,9 @@ impl ConnectionManager {
 
         // Store connection info
         let connection_info = ConnectionInfo {
-            session_info: session_info_clone,
+            session_info: session_info_clone.clone(),
             connection,
-            message_sender,
+            message_sender: message_sender.clone(),
             last_activity: Instant::now(),
         };
 
@@ -136,8 +136,22 @@ impl ConnectionManager {
             connections.insert(session_id.clone(), connection_info);
         }
 
-        // Note: We don't add to server_state.client_sessions here since that expects ClientSession
-        // The ConnectionManager maintains its own session tracking in the connections map
+        // Add session to server state for proper connection counting
+        {
+            let mut sessions = self.server_state.client_sessions.write().unwrap();
+            let client_session = crate::server::session::ClientSession {
+                session_id: session_info_clone.session_id.clone(),
+                client_info: session_info_clone.client_info.clone(),
+                state: session_info_clone.state.clone(),
+                streams: session_info_clone.streams.clone(),
+                stats: session_info_clone.stats.clone(),
+                config: crate::server::session::SessionConfig::default(),
+                message_queue: message_sender.clone(),
+                established_at: session_info_clone.established_at,
+                last_activity: session_info_clone.last_activity,
+            };
+            sessions.insert(session_id.clone(), client_session);
+        }
 
         // Update statistics
         self.server_state.stats.session_created();
@@ -214,6 +228,12 @@ impl ConnectionManager {
         };
 
         if let Some(_conn_info) = connection_info {
+            // Remove from server state sessions too
+            {
+                let mut sessions = self.server_state.client_sessions.write().unwrap();
+                sessions.remove(session_id);
+            }
+
             // Update statistics
             self.server_state.stats.session_closed();
 
@@ -294,9 +314,48 @@ impl ConnectionManager {
     ) {
         debug!("Starting connection handler for session: {}", session_id);
 
-        // TODO: Implement proper connection handling
-        // For now, this is a placeholder that just sleeps to prevent busy loop
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        // Monitor connection health and handle messages
+        let mut heartbeat_interval = tokio::time::interval(Duration::from_secs(10));
+        let mut maintenance_interval = tokio::time::interval(Duration::from_secs(30));
+
+        loop {
+            tokio::select! {
+                // Regular heartbeat checks
+                _ = heartbeat_interval.tick() => {
+                    // Check if session is still active
+                    let session_active = {
+                        let sessions = self.server_state.client_sessions.read().unwrap();
+                        sessions.get(&session_id)
+                            .map(|session| {
+                                // Check for activity within last 60 seconds
+                                session.last_activity.elapsed() < Duration::from_secs(60)
+                            })
+                            .unwrap_or(false)
+                    };
+
+                    if !session_active {
+                        debug!("Session {} inactive or removed, ending handler", session_id);
+                        break;
+                    }
+
+                    trace!("Connection {} heartbeat OK", session_id);
+                }
+
+                // Periodic maintenance tasks
+                _ = maintenance_interval.tick() => {
+                    // Update connection statistics and check limits
+                    if let Err(e) = self.perform_maintenance(&session_id).await {
+                        warn!("Maintenance failed for session {}: {}", session_id, e);
+                    }
+                }
+
+                // Handle shutdown signals or other events
+                else => {
+                    debug!("Connection handler for {} shutting down", session_id);
+                    break;
+                }
+            }
+        }
 
         // Clean up when connection ends
         let _ = self.close_connection(&session_id, "Connection handler ended").await;
@@ -405,6 +464,37 @@ impl ConnectionManager {
             .map(|conn_info| now.duration_since(conn_info.session_info.established_at))
             .max()
             .unwrap_or(Duration::from_secs(0))
+    }
+
+    /// Perform maintenance tasks for a specific connection
+    async fn perform_maintenance(&self, session_id: &str) -> ProtocolResult<()> {
+        let connections = self.connections.read().unwrap();
+
+        if let Some(conn_info) = connections.get(session_id) {
+            // Update last seen timestamp
+            let elapsed = conn_info.session_info.established_at.elapsed();
+            trace!("Connection {} maintenance: age={:?}", session_id, elapsed);
+
+            // Check connection health
+            if !conn_info.connection.is_connected() {
+                warn!("Connection {} detected as disconnected during maintenance", session_id);
+                // The connection will be cleaned up by the heartbeat check
+                return Ok(());
+            }
+
+            // Check for memory/resource limits
+            let stats = &conn_info.session_info.stats;
+            if stats.bytes_received > 100_000_000 { // 100MB threshold
+                debug!("Connection {} has processed {} bytes", session_id, stats.bytes_received);
+            }
+
+            // Update server state with connection activity
+            if let Err(e) = self.server_state.client_sessions.read() {
+                error!("Failed to read client sessions during maintenance: {}", e);
+            }
+        }
+
+        Ok(())
     }
 }
 

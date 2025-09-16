@@ -446,17 +446,43 @@ impl BackpressureManager {
     }
 
     /// Check if backpressure should be applied based on system resources
-    async fn should_apply_backpressure(_config: &BackpressureConfig) -> bool {
-        // Simplified resource checking
-        // In a real implementation, you'd check actual CPU/memory usage
+    async fn should_apply_backpressure(config: &BackpressureConfig) -> bool {
+        // Check system resource usage to determine if backpressure is needed
 
-        // For now, just return false - real implementation would check:
-        // - CPU usage via sysinfo or similar
-        // - Memory usage
-        // - Connection queue lengths
-        // - Other system metrics
+        // Memory usage check - use basic system metrics
+        let memory_check = {
+            // Get current process memory usage (simplified approach)
+            use std::fs;
+            let status = fs::read_to_string("/proc/self/status").unwrap_or_default();
+            let vm_rss = status
+                .lines()
+                .find(|line| line.starts_with("VmRSS:"))
+                .and_then(|line| line.split_whitespace().nth(1))
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(0);
 
-        false
+            // Convert from KB to bytes and check against threshold
+            let memory_usage_bytes = vm_rss * 1024;
+            let memory_threshold = (config.memory_threshold * 1024.0 * 1024.0) as u64; // Convert MB to bytes
+
+            memory_usage_bytes > memory_threshold
+        };
+
+        // Connection count check
+        let connection_check = {
+            // This would be populated by the calling system with actual connection counts
+            // For now, assume reasonable limits are not exceeded
+            false
+        };
+
+        // Apply backpressure if any threshold is exceeded
+        let should_apply = memory_check || connection_check;
+
+        if should_apply {
+            debug!("Backpressure triggered: memory={}, connections={}", memory_check, connection_check);
+        }
+
+        should_apply
     }
 }
 

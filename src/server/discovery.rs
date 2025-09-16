@@ -2,12 +2,14 @@ use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, RwLock};
 use tokio::time::{interval, timeout};
 use tracing::{debug, info, warn};
 
 use crate::protocol::error::{ProtocolError, ProtocolResult};
+use crate::protocol::commands::AdbCommand;
 use crate::server::device_registry::{DeviceRegistry, DeviceInfo, DeviceState, DeviceCapabilities, DeviceMetadata, DeviceStats};
 
 /// Device discovery service for finding available devices on the network
@@ -331,19 +333,60 @@ impl DeviceDiscovery {
 
     /// Probe a connected device to identify it
     async fn probe_device(stream: &mut TcpStream, config: &DiscoveryConfig) -> ProtocolResult<DeviceInfo> {
-        // For now, create a simple device info based on connection
-        // In a real implementation, you would send ADB commands to identify the device
-
         let peer_addr = stream.peer_addr()
             .map_err(|e| ProtocolError::ConnectionError {
                 message: format!("Failed to get peer address: {}", e)
             })?;
 
-        // Simple device identification - in practice you'd send CNXN message
-        let device_id = format!("tcp_device_{}", peer_addr.port());
+        // Send ADB CNXN message to identify the device
+        let cnxn_message = crate::protocol::message::AdbMessage::new_cnxn(
+            1, // local_id
+            0x01000000, // version
+            format!("host:discovery:{}", peer_addr).into_bytes()
+        );
 
-        // Wait a bit to see if the device responds
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        // Send CNXN message
+        let serialized = cnxn_message.serialize();
+        match stream.write_all(&serialized).await {
+            Ok(()) => {
+                debug!("Sent CNXN message to device at {}", peer_addr);
+            }
+            Err(e) => {
+                debug!("Failed to send CNXN to {}: {}", peer_addr, e);
+                // Continue with fallback identification
+            }
+        }
+
+        // Wait for response with timeout
+        let mut buffer = vec![0u8; 1024];
+        let device_id = match tokio::time::timeout(
+            config.connection_timeout,
+            stream.read(&mut buffer)
+        ).await {
+            Ok(Ok(response_size)) if response_size >= 24 => {
+                // Try to parse ADB response
+                match crate::protocol::message::AdbMessage::deserialize(&buffer[..response_size]) {
+                    Ok(response) => {
+                        if response.command == AdbCommand::CNXN as u32 {
+                            // Extract device identity from response data
+                            let identity = String::from_utf8_lossy(&response.data);
+                            if identity.is_empty() {
+                                format!("tcp_device_{}", peer_addr.port())
+                            } else {
+                                format!("{}_{}", identity.trim(), peer_addr.port())
+                            }
+                        } else {
+                            format!("tcp_device_{}", peer_addr.port())
+                        }
+                    }
+                    Err(_) => format!("tcp_device_{}", peer_addr.port())
+                }
+            }
+            _ => {
+                debug!("No valid response from {}, using fallback ID", peer_addr);
+                format!("tcp_device_{}", peer_addr.port())
+            }
+        };
 
         Ok(DeviceInfo {
             device_id: device_id.clone(),

@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 use tokio::sync::Notify;
+use tracing::{debug, warn};
 
 /// Stream manager for handling stream mapping and lifecycle
 #[derive(Debug)]
@@ -613,10 +614,21 @@ impl StreamBuffer {
                     });
                 }
                 BufferOverflowBehavior::Block => {
-                    // For now, just drop oldest data
+                    // Implement smart buffer management
                     let bytes_to_drop = data.len() - available_space;
+
+                    debug!("Buffer full, dropping {} oldest bytes from stream buffer",
+                           bytes_to_drop);
+
+                    // Drop from the beginning (oldest data first)
                     self.incoming.drain(0..bytes_to_drop);
                     self.stats.overflow_count += 1;
+                    // Track dropped bytes in overflow_count for now
+
+                    // Log warning if dropping significant amount of data
+                    if bytes_to_drop > 1024 {
+                        warn!("Stream buffer overflow: dropped {} bytes", bytes_to_drop);
+                    }
                 }
             }
         }

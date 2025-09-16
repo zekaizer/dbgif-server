@@ -478,13 +478,41 @@ impl DeviceManager {
             for device_id in device_ids {
                 let start_time = Instant::now();
 
-                // TODO: Implement actual health check (ping/pong)
-                // For now, just check if connection is still valid
+                // Implement health check by validating connection state and device registry status
                 let is_healthy = {
                     let connections = self.active_connections.read().unwrap();
                     if let Some(conn) = connections.get(&device_id) {
-                        conn.connection.is_connected()
+                        // Check basic connection status
+                        if conn.connection.is_connected() {
+                            // Also verify device is still in registry and in good state
+                            match self.device_registry.get_device(&device_id) {
+                                Ok(Some(device_info)) => {
+                                    match device_info.state {
+                                        crate::server::device_registry::DeviceState::Connected => {
+                                            debug!("Device {} is healthy (connected and in registry)", device_id);
+                                            true
+                                        }
+                                        state => {
+                                            warn!("Device {} connection exists but registry state is {:?}", device_id, state);
+                                            false
+                                        }
+                                    }
+                                }
+                                Ok(None) => {
+                                    warn!("Device {} has connection but not found in registry", device_id);
+                                    false
+                                }
+                                Err(e) => {
+                                    warn!("Failed to check device {} in registry: {}", device_id, e);
+                                    false
+                                }
+                            }
+                        } else {
+                            debug!("Device {} connection is not active", device_id);
+                            false
+                        }
                     } else {
+                        debug!("Device {} has no active connection", device_id);
                         false
                     }
                 };
