@@ -1,12 +1,11 @@
 use clap::{Parser, Subcommand};
-use dbgif_protocol::{
-    protocol::{
-        commands::AdbCommand,
-        message::AdbMessage,
-    },
-    transport::{TcpTransport, Transport, TransportAddress, Connection},
-};
+use dbgif_protocol::protocol::ascii;
 use std::{net::SocketAddr, time::Duration};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+    time::timeout,
+};
 use tracing::{debug, error, info, warn};
 
 /// DBGIF Protocol Test Client
@@ -109,12 +108,6 @@ enum TestCommand {
     Interactive,
 }
 
-impl Args {
-    /// Parse server address
-    fn server_address(&self) -> Result<SocketAddr, std::net::AddrParseError> {
-        self.server.parse()
-    }
-}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -127,156 +120,36 @@ async fn main() -> anyhow::Result<()> {
     info!("Connecting to server: {}", args.server);
 
     // Parse server address
-    let server_addr = args.server_address()?;
-    let transport_addr = TransportAddress::from(server_addr);
+    let server_addr: SocketAddr = args.server.parse()?;
 
     // Execute the requested test
     match args.test {
         TestCommand::Basic { identity } => {
-            run_basic_test(&transport_addr, &identity, args.timeout).await?;
+            run_basic_test(&server_addr, &identity, args.timeout).await?;
         }
         TestCommand::HostServices { all, service } => {
-            run_host_services_test(&transport_addr, all, service.as_deref(), args.timeout).await?;
+            run_host_services_test(&server_addr, all, service.as_deref(), args.timeout).await?;
         }
         TestCommand::Device { device_id, command } => {
-            run_device_test(&transport_addr, &device_id, &command, args.timeout).await?;
+            run_device_test(&server_addr, &device_id, &command, args.timeout).await?;
         }
         TestCommand::Streams { count, data_size } => {
-            run_streams_test(&transport_addr, count, data_size, args.timeout).await?;
+            run_streams_test(&server_addr, count, data_size, args.timeout).await?;
         }
         TestCommand::Load { connections, duration } => {
-            run_load_test(&transport_addr, connections, duration, args.timeout).await?;
+            run_load_test(&server_addr, connections, duration, args.timeout).await?;
         }
         TestCommand::Protocol { all, feature } => {
-            run_protocol_test(&transport_addr, all, feature.as_deref(), args.timeout).await?;
+            run_protocol_test(&server_addr, all, feature.as_deref(), args.timeout).await?;
         }
         TestCommand::Interactive => {
-            run_interactive_mode(&transport_addr, args.timeout).await?;
+            run_interactive_mode(&server_addr, args.timeout).await?;
         }
     }
 
     Ok(())
 }
 
-/// Test CNXN protocol compliance
-async fn test_cnxn_protocol(addr: &TransportAddress, timeout: u64) -> anyhow::Result<()> {
-    let mut connection = create_connection(addr, timeout).await?;
-
-    // Send CNXN
-    let cnxn = AdbMessage::new_cnxn(1, 0x01000000, "protocol-test".as_bytes().to_vec());
-    connection.send_bytes(&cnxn.serialize()).await?;
-
-    // Expect CNXN response
-    let mut buffer = vec![0u8; 1024];
-    let response_size = connection.receive_bytes(&mut buffer).await?;
-
-    if let Some(size) = response_size {
-        if size >= 24 {
-            let response = AdbMessage::deserialize(&buffer[..size])?;
-            if response.command == AdbCommand::CNXN as u32 {
-                info!("✅ CNXN protocol test passed");
-                return Ok(());
-            }
-        }
-    }
-
-    Err(anyhow::anyhow!("CNXN protocol test failed"))
-}
-
-/// Test PING protocol compliance
-async fn test_ping_protocol(addr: &TransportAddress, timeout: u64) -> anyhow::Result<()> {
-    let mut connection = create_connection(addr, timeout).await?;
-
-    // First establish connection
-    let cnxn = AdbMessage::new_cnxn(1, 0x01000000, "ping-test".as_bytes().to_vec());
-    connection.send_bytes(&cnxn.serialize()).await?;
-
-    // Read CNXN response
-    let mut buffer = vec![0u8; 1024];
-    let _ = connection.receive_bytes(&mut buffer).await?;
-
-    // Send PING
-    let ping = AdbMessage::new_ping();
-    connection.send_bytes(&ping.serialize()).await?;
-
-    // Expect PONG response
-    let response_size = connection.receive_bytes(&mut buffer).await?;
-
-    if let Some(size) = response_size {
-        if size >= 24 {
-            let response = AdbMessage::deserialize(&buffer[..size])?;
-            if response.command == AdbCommand::PONG as u32 {
-                info!("✅ PING protocol test passed");
-                return Ok(());
-            }
-        }
-    }
-
-    Err(anyhow::anyhow!("PING protocol test failed"))
-}
-
-/// Test host services protocol compliance
-async fn test_host_services_protocol(addr: &TransportAddress, timeout: u64) -> anyhow::Result<()> {
-    let mut connection = create_connection(addr, timeout).await?;
-
-    // First establish connection
-    let cnxn = AdbMessage::new_cnxn(1, 0x01000000, "host-services-test".as_bytes().to_vec());
-    connection.send_bytes(&cnxn.serialize()).await?;
-
-    // Read CNXN response
-    let mut buffer = vec![0u8; 1024];
-    let _ = connection.receive_bytes(&mut buffer).await?;
-
-    // Test host:version service
-    let open_msg = AdbMessage::new_open(1, "host:version".as_bytes().to_vec());
-    connection.send_bytes(&open_msg.serialize()).await?;
-
-    // Expect OKAY response
-    let response_size = connection.receive_bytes(&mut buffer).await?;
-
-    if let Some(size) = response_size {
-        if size >= 24 {
-            let response = AdbMessage::deserialize(&buffer[..size])?;
-            if response.command == AdbCommand::OKAY as u32 {
-                info!("✅ Host services protocol test passed");
-                return Ok(());
-            }
-        }
-    }
-
-    Err(anyhow::anyhow!("Host services protocol test failed"))
-}
-
-/// Test streams protocol compliance
-async fn test_streams_protocol(addr: &TransportAddress, timeout: u64) -> anyhow::Result<()> {
-    let mut connection = create_connection(addr, timeout).await?;
-
-    // First establish connection
-    let cnxn = AdbMessage::new_cnxn(1, 0x01000000, "streams-test".as_bytes().to_vec());
-    connection.send_bytes(&cnxn.serialize()).await?;
-
-    // Read CNXN response
-    let mut buffer = vec![0u8; 1024];
-    let _ = connection.receive_bytes(&mut buffer).await?;
-
-    // Open a stream
-    let open_msg = AdbMessage::new_open(1, "test-service".as_bytes().to_vec());
-    connection.send_bytes(&open_msg.serialize()).await?;
-
-    // Read response (might be OKAY or error)
-    let _ = connection.receive_bytes(&mut buffer).await?;
-
-    // Send data through stream
-    let wrte_msg = AdbMessage::new_wrte(1, 0, "test data".as_bytes().to_vec());
-    connection.send_bytes(&wrte_msg.serialize()).await?;
-
-    // Close stream
-    let clse_msg = AdbMessage::new_clse(1, 0);
-    connection.send_bytes(&clse_msg.serialize()).await?;
-
-    info!("✅ Streams protocol test completed");
-    Ok(())
-}
 
 /// Setup logging based on command line arguments
 fn setup_logging(args: &Args) {
@@ -301,182 +174,337 @@ fn setup_logging(args: &Args) {
         .init();
 }
 
-/// Create a connection to the DBGIF server
+/// Create a TCP connection to the DBGIF server
 async fn create_connection(
-    addr: &TransportAddress,
+    addr: &SocketAddr,
     timeout_secs: u64,
-) -> anyhow::Result<Box<dyn Connection>> {
-    let transport = TcpTransport::new();
-    let timeout = Duration::from_secs(timeout_secs);
+) -> anyhow::Result<TcpStream> {
+    let timeout_duration = Duration::from_secs(timeout_secs);
 
     info!("Connecting to {}", addr);
-    let connection = transport.connect_timeout(addr, timeout).await?;
+    let stream = timeout(timeout_duration, TcpStream::connect(addr)).await??;
     info!("Connected successfully");
 
-    Ok(Box::new(connection))
+    Ok(stream)
 }
 
-/// Run basic connection test (CNXN handshake)
+/// Send ASCII command
+async fn send_ascii_command(
+    stream: &mut TcpStream,
+    cmd: &str,
+) -> anyhow::Result<()> {
+    let encoded = ascii::encode_request(cmd);
+    stream.write_all(&encoded).await?;
+    Ok(())
+}
+
+/// Receive ASCII response
+async fn receive_ascii_response(
+    stream: &mut TcpStream,
+) -> anyhow::Result<(bool, String)> {
+    let mut buffer = vec![0u8; 4096];
+    let size = stream.read(&mut buffer).await?;
+
+    if size > 0 {
+        let (success, data) = ascii::decode_response(&buffer[..size])?;
+        let response = String::from_utf8_lossy(&data).to_string();
+        Ok((success, response))
+    } else {
+        Err(anyhow::anyhow!("Connection closed"))
+    }
+}
+
+/// Send STRM data
+async fn send_strm_data(
+    stream: &mut TcpStream,
+    stream_id: u8,
+    data: &[u8],
+) -> anyhow::Result<()> {
+    let encoded = ascii::encode_strm(stream_id, data);
+    stream.write_all(&encoded).await?;
+    Ok(())
+}
+
+/// Receive STRM data
+async fn receive_strm_data(
+    stream: &mut TcpStream,
+) -> anyhow::Result<(u8, Vec<u8>)> {
+    let mut buffer = vec![0u8; 4096];
+    let size = stream.read(&mut buffer).await?;
+
+    if size > 0 {
+        let (stream_id, data) = ascii::decode_strm(&buffer[..size])?;
+        Ok((stream_id, data))
+    } else {
+        Err(anyhow::anyhow!("Connection closed"))
+    }
+}
+
+/// Run basic connection test
 async fn run_basic_test(
-    addr: &TransportAddress,
+    addr: &SocketAddr,
     identity: &str,
     timeout: u64,
 ) -> anyhow::Result<()> {
     info!("=== Basic Connection Test ===");
+    info!("Testing connection with identity: {}", identity);
 
     let mut connection = create_connection(addr, timeout).await?;
 
-    // Send CNXN message
-    info!("Sending CNXN handshake with identity: {}", identity);
-    let cnxn_message = AdbMessage::new_cnxn(1, 0x01000000, identity.as_bytes().to_vec());
+    // Try a simple ASCII command to test connection
+    send_ascii_command(&mut connection, "host:version").await?;
 
-    let data = cnxn_message.serialize();
-    connection.send_bytes(&data).await?;
+    // Check if we get a response
+    let (success, response) = receive_ascii_response(&mut connection).await?;
 
-    // Wait for CNXN response
-    let mut buffer = vec![0u8; 1024];
-    let response_size = connection.receive_bytes(&mut buffer).await?;
-
-    match response_size {
-        Some(size) if size >= 24 => {
-            let response = AdbMessage::deserialize(&buffer[..size])?;
-            info!("Received response: command={:?}, arg0={}, arg1={}",
-                  AdbCommand::from_u32(response.command), response.arg0, response.arg1);
-
-            if response.command == AdbCommand::CNXN as u32 {
-                info!("✅ CNXN handshake successful!");
-                return Ok(());
-            }
-        }
-        Some(size) => {
-            warn!("Received incomplete response: {} bytes", size);
-        }
-        None => {
-            warn!("Connection closed by server");
-        }
+    if success {
+        info!("✅ Basic connection test successful!");
+        info!("Server version: {}", response);
+        return Ok(());
     }
 
-    error!("❌ CNXN handshake failed");
-    Err(anyhow::anyhow!("CNXN handshake failed"))
+    error!("❌ Basic connection test failed");
+    Err(anyhow::anyhow!("Basic connection test failed"))
 }
 
-/// Run host services test
+/// Run host services test with ASCII protocol
 async fn run_host_services_test(
-    addr: &TransportAddress,
+    addr: &SocketAddr,
     test_all: bool,
     service: Option<&str>,
     timeout: u64,
 ) -> anyhow::Result<()> {
-    info!("=== Host Services Test ===");
-
-    let mut connection = create_connection(addr, timeout).await?;
-
-    // First establish CNXN
-    let cnxn_message = AdbMessage::new_cnxn(1, 0x01000000, "test-client:host-services".as_bytes().to_vec());
-    let data = cnxn_message.serialize();
-    connection.send_bytes(&data).await?;
-
-    // Wait for CNXN response (simplified)
-    let mut buffer = vec![0u8; 1024];
-    let _ = connection.receive_bytes(&mut buffer).await?;
+    info!("=== Host Services Test (ASCII Protocol) ===");
 
     if test_all {
         // Test all host services
-        let services = vec!["host:version", "host:features", "host:list"];
-        for service_name in services {
-            info!("Testing service: {}", service_name);
-            test_host_service(&mut *connection, service_name).await?;
-        }
+        test_host_version(addr, timeout).await?;
+        test_host_list(addr, timeout).await?;
     } else if let Some(service_name) = service {
-        info!("Testing service: {}", service_name);
-        test_host_service(&mut *connection, service_name).await?;
+        match service_name {
+            "host:version" => test_host_version(addr, timeout).await?,
+            "host:list" => test_host_list(addr, timeout).await?,
+            _ => {
+                // Generic test for other services
+                let mut connection = create_connection(addr, timeout).await?;
+                send_ascii_command(&mut connection, service_name).await?;
+                let (success, response) = receive_ascii_response(&mut connection).await?;
+                if success {
+                    info!("✅ {} test passed - Response: {}", service_name, response);
+                } else {
+                    return Err(anyhow::anyhow!("{} failed: {}", service_name, response));
+                }
+            }
+        }
     } else {
         // Default: test version service
-        test_host_service(&mut *connection, "host:version").await?;
+        test_host_version(addr, timeout).await?;
     }
 
     info!("✅ Host services test completed");
     Ok(())
 }
 
-/// Test a specific host service
-async fn test_host_service(
-    connection: &mut dyn Connection,
-    service_name: &str,
+/// Test host:version service using ASCII protocol
+async fn test_host_version(
+    addr: &SocketAddr,
+    timeout: u64,
 ) -> anyhow::Result<()> {
-    // Send OPEN message for host service
-    let stream_id = 1;
-    let open_message = AdbMessage::new_open(stream_id, service_name.as_bytes().to_vec());
+    let mut connection = create_connection(addr, timeout).await?;
 
-    let data = open_message.serialize();
-    connection.send_bytes(&data).await?;
+    // Send host:version command
+    send_ascii_command(&mut connection, "host:version").await?;
 
-    // Wait for OKAY response
-    let mut buffer = vec![0u8; 1024];
-    let response_size = connection.receive_bytes(&mut buffer).await?;
+    // Receive response
+    let (success, response) = receive_ascii_response(&mut connection).await?;
 
-    if let Some(size) = response_size {
-        if size >= 24 {
-            let response = AdbMessage::deserialize(&buffer[..size])?;
-            debug!("Service {} response: command={:?}",
-                   service_name, AdbCommand::from_u32(response.command));
-            return Ok(());
-        }
+    if success {
+        info!("✅ host:version test passed - Version: {}", response);
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!("host:version failed: {}", response))
+    }
+}
+
+/// Test host:list service using ASCII protocol
+async fn test_host_list(
+    addr: &SocketAddr,
+    timeout: u64,
+) -> anyhow::Result<()> {
+    let mut connection = create_connection(addr, timeout).await?;
+
+    // Send host:list command
+    send_ascii_command(&mut connection, "host:list").await?;
+
+    // Receive response
+    let (success, response) = receive_ascii_response(&mut connection).await?;
+
+    if success {
+        info!("✅ host:list test passed - Devices: {}", response);
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!("host:list failed: {}", response))
+    }
+}
+
+
+/// Test shell service using STRM messages
+async fn test_shell_service(
+    addr: &SocketAddr,
+    timeout: u64,
+) -> anyhow::Result<()> {
+    let mut connection = create_connection(addr, timeout).await?;
+
+    // First connect to a device
+    send_ascii_command(&mut connection, "host:transport:test-device").await?;
+    let (success, _) = receive_ascii_response(&mut connection).await?;
+
+    if !success {
+        return Err(anyhow::anyhow!("Failed to connect to device"));
     }
 
-    Err(anyhow::anyhow!("Failed to test service: {}", service_name))
+    // Open shell service
+    send_ascii_command(&mut connection, "shell:").await?;
+    let (success, _) = receive_ascii_response(&mut connection).await?;
+
+    if !success {
+        return Err(anyhow::anyhow!("Failed to open shell"));
+    }
+
+    // Send command through STRM
+    let stream_id = 1;
+    send_strm_data(&mut connection, stream_id, b"echo test\n").await?;
+
+    // Receive response through STRM
+    let (recv_stream_id, data) = receive_strm_data(&mut connection).await?;
+
+    if recv_stream_id == stream_id {
+        let response = String::from_utf8_lossy(&data);
+        info!("✅ shell service test passed - Response: {}", response);
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!("Stream ID mismatch"))
+    }
 }
+
 
 /// Run device communication test
 async fn run_device_test(
-    _addr: &TransportAddress,
+    addr: &SocketAddr,
     device_id: &str,
     command: &str,
-    _timeout: u64,
+    timeout: u64,
 ) -> anyhow::Result<()> {
     info!("=== Device Communication Test ===");
     info!("Device ID: {}, Command: {}", device_id, command);
 
-    // Device test logic: connect to server and test device communication
-    info!("Testing device communication - creating test connection");
-    info!("Command to execute on device: {}", command);
+    // Connect to server
+    let mut connection = create_connection(addr, timeout).await?;
+    info!("Connected to server");
 
-    // In a full implementation, this would:
-    // 1. Connect to DBGIF server
-    // 2. Select the specified device
-    // 3. Execute the command on the device
-    // 4. Display results
-    info!("Device test completed successfully");
+    // Select the specified device
+    let transport_cmd = format!("host:transport:{}", device_id);
+    send_ascii_command(&mut connection, &transport_cmd).await?;
+
+    let (success, response) = receive_ascii_response(&mut connection).await?;
+    if !success {
+        return Err(anyhow::anyhow!("Failed to connect to device {}: {}", device_id, response));
+    }
+
+    info!("Connected to device: {}", device_id);
+
+    // Execute the command on the device (using shell service)
+    send_ascii_command(&mut connection, "shell:").await?;
+    let (success, _) = receive_ascii_response(&mut connection).await?;
+
+    if !success {
+        return Err(anyhow::anyhow!("Failed to open shell service"));
+    }
+
+    // Send the command through STRM
+    let stream_id = 1;
+    let cmd_with_newline = format!("{}\n", command);
+    send_strm_data(&mut connection, stream_id, cmd_with_newline.as_bytes()).await?;
+
+    // Receive output through STRM
+    let (recv_stream_id, output) = receive_strm_data(&mut connection).await?;
+
+    if recv_stream_id == stream_id {
+        let output_str = String::from_utf8_lossy(&output);
+        info!("Command output: {}", output_str);
+        info!("✅ Device test completed successfully");
+    } else {
+        warn!("Stream ID mismatch");
+    }
 
     Ok(())
 }
 
 /// Run stream multiplexing test
 async fn run_streams_test(
-    _addr: &TransportAddress,
+    addr: &SocketAddr,
     stream_count: usize,
     data_size: usize,
-    _timeout: u64,
+    timeout: u64,
 ) -> anyhow::Result<()> {
     info!("=== Stream Multiplexing Test ===");
     info!("Stream count: {}, Data size: {}", stream_count, data_size);
 
-    // Streams test logic: test concurrent stream multiplexing
-    info!("Testing {} concurrent streams with {} bytes data size", stream_count, data_size);
+    // Connect to server
+    let mut connection = create_connection(addr, timeout).await?;
+    info!("Connected to server");
 
-    // In a full implementation, this would:
-    // 1. Connect to DBGIF server
-    // 2. Open multiple concurrent streams
-    // 3. Send data through all streams simultaneously
-    // 4. Verify data integrity and performance
-    info!("Stream multiplexing test completed successfully");
+    // Generate test data
+    let test_data: Vec<u8> = (0..data_size)
+        .map(|i| (i % 256) as u8)
+        .collect();
 
-    Ok(())
+    // Test multiple streams concurrently
+    let mut successful_streams = 0;
+
+    for stream_id in 0..stream_count {
+        let stream_id_u8 = (stream_id % 256) as u8;
+
+        // Send data through stream
+        if let Err(e) = send_strm_data(&mut connection, stream_id_u8, &test_data).await {
+            warn!("Failed to send data on stream {}: {}", stream_id, e);
+            continue;
+        }
+
+        // Try to receive echo response
+        match tokio::time::timeout(
+            Duration::from_millis(100),
+            receive_strm_data(&mut connection)
+        ).await {
+            Ok(Ok((recv_id, recv_data))) => {
+                if recv_id == stream_id_u8 && recv_data.len() == test_data.len() {
+                    successful_streams += 1;
+                    debug!("Stream {} successful", stream_id);
+                }
+            }
+            Ok(Err(e)) => {
+                debug!("Stream {} receive error: {}", stream_id, e);
+            }
+            Err(_) => {
+                debug!("Stream {} timeout", stream_id);
+            }
+        }
+    }
+
+    let success_rate = (successful_streams as f64 / stream_count as f64) * 100.0;
+    info!("Successful streams: {}/{} ({:.1}%)", successful_streams, stream_count, success_rate);
+
+    if successful_streams > 0 {
+        info!("✅ Stream multiplexing test completed");
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!("No streams were successful"))
+    }
 }
 
 /// Run load test
 async fn run_load_test(
-    addr: &TransportAddress,
+    addr: &SocketAddr,
     connection_count: usize,
     duration: u64,
     timeout: u64,
@@ -501,18 +529,14 @@ async fn run_load_test(
                     Ok(mut conn) => {
                         connection_attempts += 1;
 
-                        // Send a CNXN message
-                        let cnxn = AdbMessage::new_cnxn(
-                            1,
-                            0x01000000,
-                            format!("load-test-{}", i).as_bytes().to_vec()
-                        );
-
-                        if conn.send_bytes(&cnxn.serialize()).await.is_ok() {
+                        // Send a test command
+                        let cmd = format!("host:version");
+                        if send_ascii_command(&mut conn, &cmd).await.is_ok() {
                             // Try to read response
-                            let mut buffer = vec![0u8; 1024];
-                            if conn.receive_bytes(&mut buffer).await.is_ok() {
-                                successful_messages += 1;
+                            if let Ok((success, _)) = receive_ascii_response(&mut conn).await {
+                                if success {
+                                    successful_messages += 1;
+                                }
                             }
                         }
                     }
@@ -551,14 +575,14 @@ async fn run_load_test(
     Ok(())
 }
 
-/// Run protocol compliance test
+/// Run protocol compliance test with ASCII protocol
 async fn run_protocol_test(
-    addr: &TransportAddress,
+    addr: &SocketAddr,
     test_all: bool,
     feature: Option<&str>,
     timeout: u64,
 ) -> anyhow::Result<()> {
-    info!("=== Protocol Compliance Test ===");
+    info!("=== Protocol Compliance Test (ASCII) ===");
 
     if test_all {
         info!("Testing all protocol features");
@@ -567,23 +591,30 @@ async fn run_protocol_test(
     }
 
     let features_to_test = if test_all {
-        vec!["cnxn", "ping", "host-services", "streams"]
+        vec!["host:version", "host:list", "shell"]
     } else if let Some(feature_name) = feature {
         vec![feature_name]
     } else {
-        vec!["cnxn"] // Default: test basic connection
+        vec!["host:version"] // Default: test version
     };
 
     for feature in features_to_test {
         info!("Testing feature: {}", feature);
 
         match feature {
-            "cnxn" => test_cnxn_protocol(addr, timeout).await?,
-            "ping" => test_ping_protocol(addr, timeout).await?,
-            "host-services" => test_host_services_protocol(addr, timeout).await?,
-            "streams" => test_streams_protocol(addr, timeout).await?,
+            "host:version" => test_host_version(addr, timeout).await?,
+            "host:list" => test_host_list(addr, timeout).await?,
+            "shell" => test_shell_service(addr, timeout).await?,
             _ => {
-                warn!("Unknown protocol feature: {}", feature);
+                // Try as generic command
+                let mut connection = create_connection(addr, timeout).await?;
+                send_ascii_command(&mut connection, feature).await?;
+                let (success, response) = receive_ascii_response(&mut connection).await?;
+                if success {
+                    info!("✅ {} test passed", feature);
+                } else {
+                    warn!("❌ {} test failed: {}", feature, response);
+                }
             }
         }
     }
@@ -592,17 +623,17 @@ async fn run_protocol_test(
     Ok(())
 }
 
-/// Run interactive mode
+/// Run interactive mode with ASCII protocol
 async fn run_interactive_mode(
-    addr: &TransportAddress,
+    addr: &SocketAddr,
     timeout: u64,
 ) -> anyhow::Result<()> {
-    info!("=== Interactive Mode ===");
+    info!("=== Interactive Mode (ASCII Protocol) ===");
     info!("Press Ctrl+C to exit");
 
     let mut connection = create_connection(addr, timeout).await?;
 
-    let mut stream_counter = 1u32;
+    let _stream_counter = 1u8;
 
     // Set up stdin reader
     use tokio::io::{stdin, BufReader, AsyncBufReadExt};
@@ -631,46 +662,23 @@ async fn run_interactive_mode(
                                 return Ok(());
                             }
                             "help" => {
-                                info!("Available commands:");
-                                info!("  cnxn [identity]     - Send connection handshake");
-                                info!("  ping               - Send ping message");
-                                info!("  open <service>     - Open service stream");
-                                info!("  wrte <id> <data>   - Write data to stream");
-                                info!("  clse <id>          - Close stream");
+                                info!("Available commands (ASCII Protocol):");
+                                info!("  host:version       - Get server version");
+                                info!("  host:list          - List devices");
+                                info!("  host:transport:<id> - Connect to device");
+                                info!("  shell:             - Open shell service");
+                                info!("  strm <id> <data>   - Send STRM data");
+                                info!("  <command>          - Send raw ASCII command");
                                 info!("  help               - Show this help");
                                 info!("  quit/exit          - Exit interactive mode");
                             }
-                            "cnxn" => {
-                                let identity = parts.get(1).unwrap_or(&"interactive-client");
-                                let msg = AdbMessage::new_cnxn(1, 0x01000000, identity.as_bytes().to_vec());
-                                if let Err(e) = connection.send_bytes(&msg.serialize()).await {
-                                    error!("Failed to send CNXN: {}", e);
-                                }
-                                info!("Sent CNXN message");
-                            }
-                            "ping" => {
-                                let msg = AdbMessage::new_ping();
-                                if let Err(e) = connection.send_bytes(&msg.serialize()).await {
-                                    error!("Failed to send PING: {}", e);
-                                }
-                                info!("Sent PING message");
-                            }
-                            "open" => {
-                                let service = parts.get(1).unwrap_or(&"shell:");
-                                let msg = AdbMessage::new_open(stream_counter, service.as_bytes().to_vec());
-                                if let Err(e) = connection.send_bytes(&msg.serialize()).await {
-                                    error!("Failed to send OPEN: {}", e);
-                                }
-                                info!("Sent OPEN for service '{}' with stream ID {}", service, stream_counter);
-                                stream_counter += 1;
-                            }
-                            "wrte" => {
+                            "strm" => {
                                 if parts.len() < 3 {
-                                    warn!("Usage: wrte <stream_id> <data>");
+                                    warn!("Usage: strm <stream_id> <data>");
                                     continue;
                                 }
 
-                                let stream_id: u32 = match parts[1].parse() {
+                                let stream_id: u8 = match parts[1].parse() {
                                     Ok(id) => id,
                                     Err(_) => {
                                         warn!("Invalid stream ID: {}", parts[1]);
@@ -679,34 +687,33 @@ async fn run_interactive_mode(
                                 };
 
                                 let data = parts[2..].join(" ");
-                                let msg = AdbMessage::new_wrte(stream_id, 0, data.as_bytes().to_vec());
-                                if let Err(e) = connection.send_bytes(&msg.serialize()).await {
-                                    error!("Failed to send WRTE: {}", e);
+                                if let Err(e) = send_strm_data(&mut connection, stream_id, data.as_bytes()).await {
+                                    error!("Failed to send STRM: {}", e);
+                                } else {
+                                    info!("Sent STRM to stream {} with {} bytes", stream_id, data.len());
                                 }
-                                info!("Sent WRTE to stream {} with {} bytes", stream_id, data.len());
-                            }
-                            "clse" => {
-                                if parts.len() < 2 {
-                                    warn!("Usage: clse <stream_id>");
-                                    continue;
-                                }
-
-                                let stream_id: u32 = match parts[1].parse() {
-                                    Ok(id) => id,
-                                    Err(_) => {
-                                        warn!("Invalid stream ID: {}", parts[1]);
-                                        continue;
-                                    }
-                                };
-
-                                let msg = AdbMessage::new_clse(stream_id, 0);
-                                if let Err(e) = connection.send_bytes(&msg.serialize()).await {
-                                    error!("Failed to send CLSE: {}", e);
-                                }
-                                info!("Sent CLSE for stream {}", stream_id);
                             }
                             _ => {
-                                warn!("Unknown command: {}. Available: cnxn, ping, open, wrte, clse, quit", command);
+                                // Treat as raw ASCII command
+                                if let Err(e) = send_ascii_command(&mut connection, trimmed).await {
+                                    error!("Failed to send command: {}", e);
+                                } else {
+                                    info!("Sent ASCII command: {}", trimmed);
+
+                                    // Try to receive response
+                                    match receive_ascii_response(&mut connection).await {
+                                        Ok((success, response)) => {
+                                            if success {
+                                                info!("← OKAY: {}", response);
+                                            } else {
+                                                warn!("← FAIL: {}", response);
+                                            }
+                                        }
+                                        Err(e) => {
+                                            debug!("No response or error: {}", e);
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -721,25 +728,34 @@ async fn run_interactive_mode(
                 }
             }
 
-            // Also try to read responses from server
+            // Also try to read STRM responses from server
             _ = async {
-                let mut buffer = vec![0u8; 1024];
-                match connection.receive_bytes(&mut buffer).await {
-                    Ok(Some(size)) if size >= 24 => {
-                        if let Ok(response) = AdbMessage::deserialize(&buffer[..size]) {
-                            info!("← Received: command=0x{:08x}, arg0={}, arg1={}, data_len={}",
-                                  response.command, response.arg0, response.arg1, response.data_length);
-                            if !response.data.is_empty() {
-                                let data_str = String::from_utf8_lossy(&response.data);
-                                info!("   Data: {}", data_str);
+                let mut buffer = vec![0u8; 4096];
+                match connection.read(&mut buffer).await {
+                    Ok(size) if size >= 9 => {
+                        // Check if it's a STRM message
+                        if &buffer[0..4] == b"STRM" {
+                            if let Ok((stream_id, data)) = ascii::decode_strm(&buffer[..size]) {
+                                let data_str = String::from_utf8_lossy(&data);
+                                info!("← STRM[{}]: {}", stream_id, data_str);
+                            }
+                        } else if size >= 8 {
+                            // Try as regular ASCII response
+                            if let Ok((success, data)) = ascii::decode_response(&buffer[..size]) {
+                                let response = String::from_utf8_lossy(&data);
+                                if success {
+                                    info!("← OKAY: {}", response);
+                                } else {
+                                    warn!("← FAIL: {}", response);
+                                }
                             }
                         }
                     }
-                    Ok(Some(size)) => {
-                        debug!("Received incomplete message: {} bytes", size);
-                    }
-                    Ok(None) => {
+                    Ok(0) => {
                         debug!("Connection closed by server");
+                    }
+                    Ok(size) => {
+                        debug!("Received message: {} bytes", size);
                     }
                     Err(_) => {
                         // No data available, continue

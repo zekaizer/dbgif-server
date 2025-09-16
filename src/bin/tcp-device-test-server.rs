@@ -4,10 +4,13 @@ use dbgif_protocol::{
         commands::AdbCommand,
         message::AdbMessage,
     },
-    transport::{TcpTransport, Transport, TransportAddress, TransportListener, Connection},
 };
-use std::{net::SocketAddr, sync::Arc, time::Duration};
-use tokio::{signal, sync::RwLock, time::interval};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+    signal, sync::RwLock, time::{interval, timeout}
+};
 use tracing::{debug, error, info, warn};
 
 /// TCP Device Test Server
@@ -81,17 +84,37 @@ impl Args {
     }
 }
 
-/// Device simulation state
+/// Connection state for 3-way handshake
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
+enum ConnectionState {
+    WaitingForServerCnxn,
+    SentDeviceCnxn,
+    Connected(u32), // Store connect_id
+}
+
+/// Stream information
+#[derive(Debug, Clone)]
+struct StreamInfo {
+    _local_id: u32,
+    _remote_id: u32,
+    service_name: String,
+    _is_open: bool,
+}
+
+/// Device simulation state
+#[derive(Debug, Clone)]
 struct DeviceState {
     device_id: String,
     device_model: String,
-    capabilities: Vec<String>,
+    _capabilities: Vec<String>,
     connection_count: u64,
     message_count: u64,
-    last_activity: std::time::Instant,
+    _last_activity: std::time::Instant,
     is_connected: bool,
+    connection_state: ConnectionState,
+    connect_id: Option<u32>,
+    streams: HashMap<u32, StreamInfo>,
 }
 
 impl DeviceState {
@@ -99,18 +122,21 @@ impl DeviceState {
         Self {
             device_id,
             device_model,
-            capabilities,
+            _capabilities: capabilities,
             connection_count: 0,
             message_count: 0,
-            last_activity: std::time::Instant::now(),
+            _last_activity: std::time::Instant::now(),
             is_connected: false,
+            connection_state: ConnectionState::WaitingForServerCnxn,
+            connect_id: None,
+            streams: HashMap::new(),
         }
     }
 
     fn connect(&mut self) {
         self.connection_count += 1;
         self.is_connected = true;
-        self.last_activity = std::time::Instant::now();
+        self._last_activity = std::time::Instant::now();
     }
 
     fn disconnect(&mut self) {
@@ -119,7 +145,7 @@ impl DeviceState {
 
     fn handle_message(&mut self) {
         self.message_count += 1;
-        self.last_activity = std::time::Instant::now();
+        self._last_activity = std::time::Instant::now();
     }
 }
 
@@ -143,13 +169,11 @@ async fn main() -> anyhow::Result<()> {
         args.parse_capabilities(),
     )));
 
-    // Setup transport and listener
+    // Setup TCP listener
     let bind_addr = args.bind_address()?;
-    let transport = TcpTransport::new();
-    let transport_addr = TransportAddress::from(bind_addr);
 
-    info!("Starting device transport listener...");
-    let mut listener = transport.listen(&transport_addr).await?;
+    info!("Starting device TCP listener...");
+    let listener = TcpListener::bind(&bind_addr).await?;
 
     info!("TCP Device Test Server is ready on {}", bind_addr);
     info!("Waiting for DBGIF server connections...");
@@ -180,7 +204,7 @@ async fn main() -> anyhow::Result<()> {
         }
 
         // Accept connections
-        result = accept_connections(&mut *listener, device_state, args.latency, args.error_rate) => {
+        result = accept_connections(listener, device_state, args.latency, args.error_rate) => {
             if let Err(e) = result {
                 error!("Device server error: {}", e);
                 return Err(e);
@@ -246,7 +270,7 @@ async fn setup_shutdown_handler() {
 
 /// Accept and handle incoming connections
 async fn accept_connections(
-    listener: &mut dyn TransportListener<Connection = impl Connection + 'static>,
+    listener: TcpListener,
     device_state: Arc<RwLock<DeviceState>>,
     latency_ms: u64,
     error_rate: f64,
@@ -256,9 +280,8 @@ async fn accept_connections(
     loop {
         // Accept new connection
         match listener.accept().await {
-            Ok(connection) => {
-                let connection_id = connection.connection_id();
-                info!("New connection accepted: {}", connection_id);
+            Ok((stream, addr)) => {
+                info!("New connection accepted from: {}", addr);
 
                 // Update device state
                 {
@@ -270,7 +293,7 @@ async fn accept_connections(
                 let state_clone = Arc::clone(&device_state);
                 tokio::spawn(async move {
                     if let Err(e) = handle_connection(
-                        Box::new(connection),
+                        stream,
                         state_clone,
                         latency_ms,
                         error_rate,
@@ -287,17 +310,22 @@ async fn accept_connections(
     }
 }
 
-/// Handle an individual connection
+/// Handle an individual connection with 3-way handshake
 async fn handle_connection(
-    mut connection: Box<dyn Connection>,
+    mut stream: TcpStream,
     device_state: Arc<RwLock<DeviceState>>,
     latency_ms: u64,
-    _error_rate: f64,
+    error_rate: f64,
 ) -> anyhow::Result<()> {
-    let connection_id = connection.connection_id();
-    info!("Handling connection: {}", connection_id);
+    info!("Handling connection");
 
-    let mut buffer = vec![0u8; 1024];
+    let mut buffer = vec![0u8; 4096];
+
+    // Start heartbeat task
+    let state_clone = Arc::clone(&device_state);
+    let heartbeat_handle = tokio::spawn(async move {
+        heartbeat_task(state_clone).await;
+    });
 
     loop {
         // Simulate device latency
@@ -305,14 +333,38 @@ async fn handle_connection(
             tokio::time::sleep(Duration::from_millis(latency_ms)).await;
         }
 
-        // Read message from connection
-        match connection.receive_bytes(&mut buffer).await? {
-            Some(size) if size >= 24 => {
+        // Read message from connection with timeout
+        match timeout(Duration::from_secs(30), stream.read(&mut buffer)).await {
+            Ok(Ok(size)) if size >= 24 => {
                 // Parse ADB message
                 match AdbMessage::deserialize(&buffer[..size]) {
                     Ok(message) => {
                         debug!("Received message: command={:?}, arg0={}, arg1={}",
                                AdbCommand::from_u32(message.command), message.arg0, message.arg1);
+
+                        // Simulate random errors based on error_rate
+                        if error_rate > 0.0 && rand::random::<f64>() < error_rate {
+                            warn!("Simulating error (rate: {})", error_rate);
+                            // Send corrupted response or drop connection
+                            if rand::random::<bool>() {
+                                // Send error response
+                                let error_msg = AdbMessage {
+                                    command: 0xDEADBEEF,
+                                    arg0: 0,
+                                    arg1: 0,
+                                    data_length: 0,
+                                    data_crc32: 0,
+                                    magic: !0xDEADBEEF,
+                                    data: vec![],
+                                };
+                                let _ = stream.write_all(&error_msg.serialize()).await;
+                                continue;
+                            } else {
+                                // Drop connection
+                                warn!("Simulating connection drop");
+                                break;
+                            }
+                        }
 
                         // Update device state
                         {
@@ -320,10 +372,12 @@ async fn handle_connection(
                             state.handle_message();
                         }
 
-                        // Handle the message
-                        if let Some(response) = handle_device_message(&message, &device_state).await? {
+                        // Handle the message based on connection state
+                        let responses = handle_device_message_with_state(&message, &device_state, &mut stream).await?;
+
+                        for response in responses {
                             let response_data = response.serialize();
-                            connection.send_bytes(&response_data).await?;
+                            stream.write_all(&response_data).await?;
                             debug!("Sent response: command={:?}",
                                    AdbCommand::from_u32(response.command));
                         }
@@ -333,15 +387,28 @@ async fn handle_connection(
                     }
                 }
             }
-            Some(size) => {
+            Ok(Ok(size)) if size == 0 => {
+                info!("Connection closed by peer");
+                break;
+            }
+            Ok(Ok(size)) => {
                 warn!("Received incomplete message: {} bytes", size);
             }
-            None => {
-                info!("Connection closed by peer: {}", connection_id);
+            Ok(Err(e)) => {
+                error!("Error receiving message: {}", e);
                 break;
+            }
+            Err(_) => {
+                warn!("Connection timeout, sending PING");
+                // Send PING on timeout
+                let ping = AdbMessage::new_ping();
+                stream.write_all(&ping.serialize()).await?;
             }
         }
     }
+
+    // Abort heartbeat task
+    heartbeat_handle.abort();
 
     // Update device state on disconnect
     {
@@ -349,54 +416,177 @@ async fn handle_connection(
         state.disconnect();
     }
 
-    info!("Connection handler finished: {}", connection_id);
+    info!("Connection handler finished");
     Ok(())
 }
 
-/// Handle device-specific protocol messages
-async fn handle_device_message(
+/// Handle device messages with proper 3-way handshake state machine
+async fn handle_device_message_with_state(
     message: &AdbMessage,
     device_state: &Arc<RwLock<DeviceState>>,
-) -> anyhow::Result<Option<AdbMessage>> {
+    _stream: &mut TcpStream,
+) -> anyhow::Result<Vec<AdbMessage>> {
     let command = AdbCommand::from_u32(message.command);
+    let mut responses = Vec::new();
 
     match command {
         Some(AdbCommand::CNXN) => {
-            info!("Handling CNXN handshake");
-            let state = device_state.read().await;
-            let device_info = format!("device::{}", state.device_id);
+            let mut state = device_state.write().await;
 
-            Ok(Some(AdbMessage::new_cnxn(
-                0x01000000, // Protocol version
-                1024 * 1024, // Max data size
-                device_info.as_bytes().to_vec(),
-            )))
+            match state.connection_state {
+                ConnectionState::WaitingForServerCnxn => {
+                    info!("Received initial CNXN from server");
+
+                    // Parse connect_id from server's CNXN
+                    let connect_id = message.arg0;
+
+                    // Send device CNXN response
+                    let device_info = format!("device:{}:{}",
+                        state.device_model, state.device_id);
+
+                    let cnxn_response = AdbMessage::new_cnxn(
+                        0x01000000,  // Protocol version
+                        1024 * 1024, // Max data size
+                        device_info.as_bytes().to_vec(),
+                    );
+
+                    responses.push(cnxn_response);
+
+                    // Update state
+                    state.connection_state = ConnectionState::SentDeviceCnxn;
+                    state.connect_id = Some(connect_id);
+
+                    info!("Sent device CNXN, moving to SentDeviceCnxn state");
+                }
+                ConnectionState::SentDeviceCnxn => {
+                    info!("Received final CNXN from server");
+
+                    // Extract connect_id
+                    let connect_id = message.arg0;
+
+                    // Complete handshake
+                    state.connection_state = ConnectionState::Connected(connect_id);
+                    state.connect_id = Some(connect_id);
+                    state.is_connected = true;
+
+                    info!("3-way handshake complete! Connected with ID: {}", connect_id);
+                }
+                ConnectionState::Connected(_) => {
+                    warn!("Received unexpected CNXN in connected state");
+                }
+            }
         }
         Some(AdbCommand::PING) => {
             debug!("Handling PING");
-            Ok(Some(AdbMessage::new_pong()))
+
+            // Get connect_id for PONG
+            let connect_id = {
+                let state = device_state.read().await;
+                state.connect_id.unwrap_or(0)
+            };
+
+            // Send PONG with matching token
+            let pong = AdbMessage {
+                command: AdbCommand::PONG as u32,
+                arg0: connect_id,
+                arg1: message.arg1, // Echo back the token
+                data_length: 0,
+                data_crc32: 0,
+                magic: !(AdbCommand::PONG as u32),
+                data: vec![],
+            };
+
+            responses.push(pong);
         }
         Some(AdbCommand::OPEN) => {
-            info!("Handling OPEN request");
-            // For simplicity, acknowledge all OPEN requests
-            Ok(Some(AdbMessage::new_okay(message.arg0, message.arg1)))
+            info!("Handling OPEN request for stream {}", message.arg0);
+
+            let mut state = device_state.write().await;
+
+            // Parse service name from data
+            let service_name = String::from_utf8_lossy(&message.data).to_string();
+            info!("Opening service: {}", service_name);
+
+            // Create stream
+            let stream_info = StreamInfo {
+                _local_id: message.arg0,
+                _remote_id: message.arg0, // Will be updated when we send OKAY
+                service_name,
+                _is_open: true,
+            };
+
+            state.streams.insert(message.arg0, stream_info);
+
+            // Send OKAY with stream IDs
+            responses.push(AdbMessage::new_okay(message.arg0, message.arg0));
         }
         Some(AdbCommand::WRTE) => {
-            debug!("Handling WRTE data transfer");
-            // Echo back the data or send acknowledgment
-            Ok(Some(AdbMessage::new_okay(message.arg1, message.arg0)))
+            debug!("Handling WRTE for stream {}", message.arg0);
+
+            // Check if stream exists
+            let stream_exists = {
+                let state = device_state.read().await;
+                state.streams.contains_key(&message.arg0)
+            };
+
+            if stream_exists {
+                // Send OKAY acknowledgment
+                responses.push(AdbMessage::new_okay(message.arg1, message.arg0));
+
+                // Echo back data (for testing)
+                if !message.data.is_empty() {
+                    let echo_msg = AdbMessage::new_wrte(
+                        message.arg1, // Remote's stream ID
+                        message.arg0, // Our stream ID
+                        message.data.clone(),
+                    );
+                    responses.push(echo_msg);
+                }
+            } else {
+                warn!("WRTE for unknown stream {}", message.arg0);
+            }
         }
         Some(AdbCommand::CLSE) => {
-            debug!("Handling CLSE stream close");
-            Ok(Some(AdbMessage::new_okay(message.arg1, message.arg0)))
+            debug!("Handling CLSE for stream {}", message.arg0);
+
+            let mut state = device_state.write().await;
+
+            // Remove stream
+            if let Some(mut stream) = state.streams.remove(&message.arg0) {
+                stream._is_open = false;
+                info!("Closed stream {} for service {}", message.arg0, stream.service_name);
+
+                // Send CLSE acknowledgment
+                responses.push(AdbMessage::new_clse(message.arg1, message.arg0));
+            } else {
+                warn!("CLSE for unknown stream {}", message.arg0);
+            }
         }
         Some(cmd) => {
             debug!("Unhandled command: {:?}", cmd);
-            Ok(None)
         }
         None => {
             warn!("Unknown command: 0x{:08x}", message.command);
-            Ok(None)
+        }
+    }
+
+    Ok(responses)
+}
+
+/// Periodic heartbeat task
+async fn heartbeat_task(device_state: Arc<RwLock<DeviceState>>) {
+    let mut interval = interval(Duration::from_secs(1));
+
+    loop {
+        interval.tick().await;
+
+        let should_ping = {
+            let state = device_state.read().await;
+            matches!(state.connection_state, ConnectionState::Connected(_))
+        };
+
+        if should_ping {
+            debug!("Heartbeat check - connection active");
         }
     }
 }
