@@ -99,38 +99,179 @@ Ping response.
 
 **Data:** None
 
+## Host Services
+
+The server provides special host services that clients can access using the OPEN command. These services are handled by the server itself rather than being forwarded to devices.
+
+### Service Types
+
+#### host:list
+Lists all available devices registered with the server with detailed information.
+
+**Usage:** Client sends OPEN with data "host:list"
+
+**Response:** Server responds with OKAY, then sends device list via WRTE
+
+**Response Format (in WRTE data):**
+```
+<device_id> <status> <systemtype> <model> <version>
+<device_id> <status> <systemtype> <model> <version>
+...
+```
+
+**Device Status:**
+- `device`: Device is connected and ready
+- `offline`: Device is registered but not connected
+
+**Example Session:**
+```
+Client -> Server: OPEN(1, 0, "host:list")
+Server -> Client: OKAY(1, 100)
+Server -> Client: WRTE(1, 100, "tcp:custom001 offline tizen MyBoard v1.2\nusb:device123 device seret DevBoard v2.0\n")
+Client -> Server: OKAY(100, 1)
+```
+
+#### host:device:<device_id>
+Selects a target device for the current client session. All subsequent OPEN commands will be forwarded to this device.
+
+**Usage:** Client sends OPEN with data "host:device:tcp:custom001"
+
+**Response:**
+- OKAY: Device selected successfully
+- CLSE: Device not found or unavailable
+
+**Note:** Once a device is selected, all non-host OPEN commands from this client session will be automatically forwarded to the selected device until the client disconnects or selects a different device.
+
+#### host:version
+Returns server version information.
+
+**Usage:** Client sends OPEN with data "host:version"
+
+**Response:** Server responds with OKAY, then sends version via WRTE
+
+**Example Session:**
+```
+Client -> Server: OPEN(1, 0, "host:version")
+Server -> Client: OKAY(1, 100)
+Server -> Client: WRTE(1, 100, "dbgif-server 1.0.0")
+Client -> Server: OKAY(100, 1)
+```
+
+#### host:features
+Lists server capabilities and supported features.
+
+**Usage:** Client sends OPEN with data "host:features"
+
+**Response:** Server responds with OKAY, then sends feature list via WRTE
+
+**Example Session:**
+```
+Client -> Server: OPEN(1, 0, "host:features")
+Server -> Client: OKAY(1, 100)
+Server -> Client: WRTE(1, 100, "lazy-connection\nmulti-client\nping-pong\n")
+Client -> Server: OKAY(100, 1)
+```
+
+## Device Discovery
+
+Devices are discovered through transport layer mechanisms without requiring immediate connection:
+
+### TCP Transport Discovery
+- Devices advertise their availability on configured network ports
+- Server detects advertisement and registers device as "offline"
+- Device information is obtained through advertisement protocol
+
+### USB Transport Discovery
+- Server enumerates USB devices using device descriptors
+- Compatible devices are registered as "offline"
+- Device serial numbers are extracted from USB descriptors
+
+### Device Registration
+When discovered, devices are registered with:
+- **Device ID**: `<transport>:<serial>` format (e.g., `tcp:custom001`, `usb:device123`)
+- **Status**: Initially "offline"
+- **Transport Info**: Connection details for later use
+- **Basic Info**: Model, version if available from discovery
+
+When a device daemon connects and provides full information, the registration is updated with:
+- **System Type**: Device system type (e.g., tizen, seret)
+- **Banner Properties**: Device capabilities and version info
+- **CNXN Data Format**: `<systemtype>:<device_serialno>:<banner>`
+
+**Example CNXN Data:**
+```
+tizen:custom001:banner ro.product.model=MyBoard;ro.build.version=v1.2;ro.connect.id=0x12345678;
+```
+
+**Common Banner Properties:**
+- `ro.product.model`: Device model name
+- `ro.build.version`: Firmware/software version
+- `ro.connect.id`: Connection identifier (32-bit value, used in PING/PONG)
+
 ## Connection Flow
 
 ### Client-Server Connection
 1. Client connects to server via TCP
 2. Client sends CNXN with device info
 3. Server responds with CNXN
-4. Client can now send OPEN/PING commands
+4. Client can now send OPEN/PING commands or host services
 5. For each OPEN, server responds with OKAY/CLSE
 6. Data exchange via WRTE/OKAY pairs
 7. Stream closed with CLSE
 
-### Device-Daemon Connection Flow
-1. Server initiates connection to device daemon via TCP/USB
-2. Server sends CNXN with b"RESET\x00" to reset device state
-3. Device daemon sends CNXN with device identifier and capabilities
-4. Server responds with CNXN acknowledgment (arg0 contains protocol version)
-5. Server registers device in internal device list
-6. Device daemon can now receive forwarded commands from clients
-7. Device maintains connection via periodic PING/PONG (every 1 seconds, 3 second timeout)
-8. On disconnect, server removes device from available list
+### Client Device Selection Flow
+When a client wants to communicate with a specific device:
+
+1. **Device Discovery**: Client sends OPEN with "host:list"
+2. **Device Selection**: Client sends OPEN with "host:device:<device_id>"
+3. **Service Access**: Client sends OPEN with desired service (e.g., "shell:", "tcp:8080")
+4. **Automatic Forwarding**: Server forwards all subsequent OPEN commands to selected device
+5. **Session Persistence**: Device selection remains active until client disconnects or selects another device
+
+**Example Session:**
+```
+Client -> Server: OPEN(1, 0, "host:list")
+Server -> Client: OKAY(1, 100) + device list data
+Client -> Server: OPEN(2, 0, "host:device:tcp:custom001")
+Server -> Client: OKAY(2, 101) (device selected)
+Client -> Server: OPEN(3, 0, "shell:")
+Server -> Device: OPEN(3, 0, "shell:") (forwarded to tcp:custom001)
+```
+
+### Server-Device Connection Flow
+The server uses lazy connection establishment to optimize resource usage:
+
+1. **Device Discovery**: Transport layer discovers devices and registers them as "offline"
+2. **Device Registration**: Server maintains device list without immediate connection
+3. **Client Device Selection**: Client uses "host:device:<device_id>" to select target device
+4. **On-Demand Connection**: When client sends first non-host OPEN request after device selection:
+   - Server initiates connection to selected device via appropriate transport
+   - Server sends CNXN with b"RESET\x00" to reset device state
+   - Device daemon sends CNXN with device identifier and capabilities
+   - Server responds with CNXN acknowledgment (arg0 contains protocol version)
+   - Device status changes from "offline" to "device"
+5. **Connection Reuse**: Subsequent client requests use existing device connection
+6. **Connection Maintenance**: Device maintains connection via periodic PING/PONG (every 1 second, 3 second timeout)
+7. **Multi-Client Support**: Multiple clients can select and use the same device simultaneously
+8. **Cleanup**: On disconnect, device status returns to "offline" and server removes from active connections
 
 ### Three-way Communication Flow
-When a client wants to communicate with a device:
+When a client wants to communicate with a device (after device selection):
 
 1. **Client Request**: Client sends OPEN to server with service name
-2. **Device Lookup**: Server finds target device by ID/capabilities
-3. **Forward Request**: Server forwards OPEN to device daemon
-4. **Device Response**: Device daemon responds with OKAY/CLSE
-5. **Relay Response**: Server relays device response to client
-6. **Stream Establishment**: If successful, bidirectional stream is created
-7. **Data Forwarding**: All WRTE commands are forwarded between client and device
-8. **Stream Closure**: Either side can close with CLSE, forwarded to other side
+2. **Device Validation**: Server uses previously selected device from `host:device` command
+3. **Connection Check**: Server ensures device is connected (connects if offline)
+4. **Forward Request**: Server forwards OPEN to selected device daemon
+5. **Device Response**: Device daemon responds with OKAY/CLSE
+6. **Relay Response**: Server relays device response to client
+7. **Stream Establishment**: If successful, bidirectional stream is created
+8. **Data Forwarding**: All WRTE commands are forwarded between client and device
+9. **Stream Closure**: Either side can close with CLSE, forwarded to other side
+
+**Error Cases:**
+- No device selected: Server responds with CLSE
+- Selected device unavailable: Server responds with CLSE
+- Device connection fails: Server responds with CLSE
 
 ```
 Client ----OPEN(arg0=1, arg1=0)--------> Server ----OPEN(arg0=1, arg1=0)--------> Device
@@ -140,29 +281,6 @@ Device ----OKAY(arg0=100, arg1=1)------> Server ----OKAY(arg0=100, arg1=1)------
 Client ----CLSE(arg0=1, arg1=100)------> Server ----CLSE(arg0=1, arg1=100)------> Device
 ```
 
-## Device Registration
-
-When a device daemon connects, it must provide identification and capability information in the CNXN command:
-
-**CNXN Data Format for Devices:**
-```
-<systemtype>:<device_serialno>:<banner>
-```
-
-**Example:**
-```
-tizen:custom001:banner ro.product.model=MyBoard;ro.build.version=v1.2;ro.connect.id=0x12345678;
-```
-
-**Fields:**
-- `systemtype`: Device system type (e.g., tizen, seret)
-- `device_serialno`: Unique device serial number
-- `banner`: Properties string in format "banner ro.property1=value;...;ro.propertyx=value;"
-
-**Common Banner Properties:**
-- `ro.product.model`: Device model name
-- `ro.build.version`: Firmware/software version
-- `ro.connect.id`: Connection identifier (32-bit value, used in PING/PONG)
 
 ## Stream Forwarding
 
@@ -201,12 +319,23 @@ The server maintains stream mapping between clients and devices:
 
 ## Error Handling
 
+**General Error Cases:**
 - Invalid commands are ignored
 - Failed operations return CLSE
 - Connection drops terminate all streams
 - CRC32 validation on data payloads
 - Network timeouts result in connection termination
 - Malformed packets are discarded without response
+
+**Device Selection Errors:**
+- OPEN without device selection: Server responds with CLSE
+- Invalid device ID in `host:device`: Server responds with CLSE
+- Selected device unavailable: Server responds with CLSE on service OPEN
+
+**Connection Errors:**
+- Device connection failure: Server responds with CLSE, device remains "offline"
+- Device disconnect during operation: All active streams receive CLSE
+- Transport errors: Affected device marked "offline", clients notified via CLSE
 
 ## Concurrency and Error Recovery
 
