@@ -11,6 +11,7 @@ pub mod limits;
 pub mod heartbeat;
 pub mod discovery;
 pub mod shutdown;
+pub mod ascii_handler;
 
 use std::sync::Arc;
 use tracing::{info, error, debug, warn};

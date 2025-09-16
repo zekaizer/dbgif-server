@@ -2,15 +2,16 @@ use clap::Parser;
 use dbgif_protocol::{
     config::DbgifConfig,
     server::{
+        ascii_handler::AsciiHandler,
         connection_manager::ConnectionManager,
         device_manager::DeviceManager,
         dispatcher::MessageDispatcher,
         state::{ServerConfig, ServerState},
         stream_forwarder::StreamForwarder,
     },
-    transport::{TcpTransport, Transport, TransportAddress, TransportListener, Connection},
 };
 use std::{net::SocketAddr, sync::Arc};
+use tokio::net::TcpListener;
 use tokio::signal;
 use tracing::{error, info};
 
@@ -149,12 +150,8 @@ async fn main() -> anyhow::Result<()> {
     // Initialize core components
     let connection_manager = ConnectionManager::new(Arc::clone(&server_state));
     let device_manager = DeviceManager::new(Arc::clone(&server_state), Arc::clone(&device_registry));
-    let stream_forwarder = StreamForwarder::new(Arc::clone(&server_state));
-    let message_dispatcher = MessageDispatcher::new(Arc::clone(&server_state));
-
-    // Setup transport
-    let transport = TcpTransport::new();
-    let listen_addr = TransportAddress::from(server_addr);
+    let stream_forwarder = Arc::new(StreamForwarder::new(Arc::clone(&server_state)));
+    let _message_dispatcher = MessageDispatcher::new(Arc::clone(&server_state));
 
     info!("Starting server components...");
 
@@ -165,9 +162,9 @@ async fn main() -> anyhow::Result<()> {
 
     info!("All components started successfully");
 
-    // Start listening for connections
-    info!("Starting transport listener on {}", listen_addr);
-    let listener = transport.listen(&listen_addr).await?;
+    // Start TCP listener for client connections
+    info!("Starting TCP listener on {}", server_addr);
+    let listener = TcpListener::bind(server_addr).await?;
 
     info!("DBGIF server is ready and listening on {}", server_addr);
     info!("Press Ctrl+C to shutdown gracefully");
@@ -182,8 +179,8 @@ async fn main() -> anyhow::Result<()> {
             info!("Shutdown signal received, stopping server...");
         }
 
-        // Accept connections (simplified for now)
-        result = accept_connections(listener, connection_manager, message_dispatcher) => {
+        // Accept connections using ASCII protocol
+        result = accept_connections(listener, Arc::clone(&server_state), Arc::clone(&stream_forwarder)) => {
             if let Err(e) = result {
                 error!("Server error: {}", e);
                 return Err(e);
@@ -247,26 +244,36 @@ async fn setup_shutdown_handler() {
     }
 }
 
-/// Accept incoming connections
+/// Accept incoming connections with ASCII protocol
 async fn accept_connections(
-    mut listener: Box<dyn TransportListener<Connection = impl Connection + 'static>>,
-    connection_manager: ConnectionManager,
-    _message_dispatcher: MessageDispatcher,
+    listener: TcpListener,
+    server_state: Arc<ServerState>,
+    stream_forwarder: Arc<StreamForwarder>,
 ) -> anyhow::Result<()> {
     info!("Connection acceptance loop started");
 
+    let mut session_counter = 0u64;
+
     loop {
         match listener.accept().await {
-            Ok(connection) => {
-                let connection_id = connection.connection_id();
-                info!("New connection accepted: {}", connection_id);
+            Ok((stream, addr)) => {
+                info!("New client connection from: {}", addr);
+
+                // Generate session ID
+                session_counter += 1;
+                let session_id = format!("session-{:04}", session_counter);
+
+                // Create ASCII handler for this connection
+                let handler = AsciiHandler::new(
+                    Arc::clone(&server_state),
+                    Arc::clone(&stream_forwarder),
+                    session_id.clone(),
+                );
 
                 // Handle connection in background task
-                let conn_mgr = connection_manager.clone();
-
                 tokio::spawn(async move {
-                    if let Err(e) = handle_connection(Box::new(connection), conn_mgr).await {
-                        error!("Connection handling failed: {}", e);
+                    if let Err(e) = handler.handle_connection(stream).await {
+                        error!("ASCII connection handling failed: {}", e);
                     }
                 });
             }
@@ -278,19 +285,3 @@ async fn accept_connections(
     }
 }
 
-/// Handle a single connection
-async fn handle_connection(
-    connection: Box<dyn Connection>,
-    connection_manager: ConnectionManager,
-) -> anyhow::Result<()> {
-    let connection_id = connection.connection_id();
-    info!("Handling connection: {}", connection_id);
-
-    // Add connection to manager
-    let session_id = connection_manager.accept_connection(connection).await?;
-    info!("Connection registered with session ID: {}", session_id);
-
-    // Connection lifecycle is now managed by the connection manager
-    // The connection will be cleaned up when the session ends
-    Ok(())
-}
