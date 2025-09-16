@@ -112,8 +112,9 @@ impl NusbHotplugDetector {
     /// Convert nusb hotplug event to our event format
     /// TODO: Update this once nusb hotplug API is stabilized
     fn convert_nusb_event(&self, device_info: &nusb::DeviceInfo, event_type: HotplugEventType) -> Result<HotplugEvent> {
+        // Use bus_id (cross-platform) instead of busnum (Linux-only)
         let device_id = format!("usb-{}-{}",
-            device_info.busnum(),
+            device_info.bus_id(),
             device_info.device_address()
         );
 
@@ -121,13 +122,16 @@ impl NusbHotplugDetector {
         let vendor_id = 0x0000; // TODO: Get from device_info when API is available
         let product_id = 0x0000; // TODO: Get from device_info when API is available
 
+        // Try to parse bus_id as a number, use 0 as fallback
+        let bus_number = device_info.bus_id().parse::<u8>().unwrap_or(0);
+
         let event = HotplugEvent::new(
             device_id,
             event_type,
             vendor_id,
             product_id,
         ).with_bus_info(
-            device_info.busnum(),
+            bus_number,
             device_info.device_address(),
         );
 
