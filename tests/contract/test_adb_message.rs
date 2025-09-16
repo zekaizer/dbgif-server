@@ -5,8 +5,20 @@ mod tests {
 
     #[test]
     fn test_adb_message_header_size() {
-        // ADB message header must be exactly 24 bytes
-        assert_eq!(std::mem::size_of::<AdbMessage>(), 24);
+        // ADB message header when serialized must be exactly 24 bytes
+        let msg = AdbMessage {
+            command: AdbCommand::CNXN as u32,
+            arg0: 0x01000000,
+            arg1: 0x1000,
+            data_length: 0, // No data
+            data_crc32: 0,
+            magic: !(AdbCommand::CNXN as u32),
+            data: Vec::new(),
+        };
+
+        let serialized = msg.serialize();
+        // Header should be 24 bytes (6 u32 fields = 6 * 4 = 24 bytes)
+        assert_eq!(serialized.len(), 24);
     }
 
     #[test]
