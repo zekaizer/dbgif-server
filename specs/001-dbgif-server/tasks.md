@@ -88,9 +88,9 @@
 - [x] T038 DBGIF server binary with CLI in src/bin/dbgif-server.rs
 - [x] T039 Test client binary with CLI in src/bin/dbgif-test-client.rs
 - [x] T040 TCP device test server in src/bin/tcp-device-test-server.rs
-- [ ] T041 Configuration parsing and validation in src/config.rs
-- [ ] T042 Logging and tracing setup in src/logging.rs
-- [ ] T043 Error handling and graceful shutdown in src/server/shutdown.rs
+- [x] T041 Configuration parsing and validation in src/config.rs
+- [x] T042 Logging and tracing setup in src/logging.rs
+- [x] T043 Error handling and graceful shutdown in src/server/shutdown.rs
 
 ## Phase 3.5: Integration
 - [ ] T044 Wire up host services to server in src/server/mod.rs
