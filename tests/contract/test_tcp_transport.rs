@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use dbgif_protocol::transport::{TcpTransport, Transport, TransportConfig};
+    use dbgif_protocol::transport::{TcpTransport, Transport, TransportConfig, TransportAddress};
     use std::net::SocketAddr;
     use tokio::time::Duration;
 
@@ -16,7 +16,8 @@ mod tests {
         // Test that TCP transport can listen on a port
         let transport = TcpTransport::new();
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let listen_result = transport.listen(addr).await;
+        let transport_addr = TransportAddress::Tcp(addr);
+        let listen_result = transport.listen(&transport_addr).await;
         assert!(listen_result.is_ok());
     }
 
@@ -39,8 +40,9 @@ mod tests {
         // Test connection timeout behavior
         let transport = TcpTransport::new();
         let invalid_addr: SocketAddr = "192.0.2.1:12345".parse().unwrap(); // RFC 5737 test address
+        let transport_addr = TransportAddress::Tcp(invalid_addr);
 
-        let connect_result = transport.connect_timeout(invalid_addr, Duration::from_millis(100)).await;
+        let connect_result = transport.connect_timeout(&transport_addr, Duration::from_millis(100)).await;
         assert!(connect_result.is_err());
     }
 

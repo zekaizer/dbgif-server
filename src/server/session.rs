@@ -1,7 +1,6 @@
 use crate::protocol::error::{ProtocolError, ProtocolResult};
 use crate::protocol::message::AdbMessage;
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Notify};
@@ -63,8 +62,8 @@ pub struct ClientSessionInfo {
 /// Client connection information
 #[derive(Debug, Clone)]
 pub struct ClientInfo {
-    /// Client socket address
-    pub address: SocketAddr,
+    /// Connection identifier (e.g., "tcp://127.0.0.1:12345")
+    pub connection_id: String,
     /// Client identification string
     pub identity: Option<String>,
     /// Protocol version negotiated
@@ -566,7 +565,7 @@ mod tests {
 
     fn create_test_client_info() -> ClientInfo {
         ClientInfo {
-            address: "127.0.0.1:12345".parse().unwrap(),
+            connection_id: "tcp://127.0.0.1:12345→127.0.0.1:5555".to_string(),
             identity: Some("test-client".to_string()),
             protocol_version: 0x01000000,
             max_data_size: 1024 * 1024,

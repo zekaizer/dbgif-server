@@ -19,19 +19,19 @@ pub trait Transport: Send + Sync {
     type Connection: Connection;
 
     /// Start listening for incoming connections on the specified address
-    async fn listen(&self, addr: SocketAddr) -> TransportResult<Box<dyn TransportListener<Connection = Self::Connection>>>;
+    async fn listen(&self, addr: &TransportAddress) -> TransportResult<Box<dyn TransportListener<Connection = Self::Connection>>>;
 
     /// Connect to a remote address (for client-side connections)
-    async fn connect(&self, addr: SocketAddr) -> TransportResult<Self::Connection>;
+    async fn connect(&self, addr: &TransportAddress) -> TransportResult<Self::Connection>;
 
     /// Connect with timeout
-    async fn connect_timeout(&self, addr: SocketAddr, timeout: Duration) -> TransportResult<Self::Connection>;
+    async fn connect_timeout(&self, addr: &TransportAddress, timeout: Duration) -> TransportResult<Self::Connection>;
 
     /// Get the transport type name for logging
     fn transport_type(&self) -> &'static str;
 
     /// Check if the transport supports the given address
-    fn supports_address(&self, addr: &SocketAddr) -> bool;
+    fn supports_address(&self, addr: &TransportAddress) -> bool;
 
     /// Get maximum data size supported by this transport
     fn max_data_size(&self) -> usize;
@@ -47,10 +47,10 @@ pub trait TransportListener: Send + Sync {
     type Connection: Connection;
 
     /// Accept a new incoming connection
-    async fn accept(&mut self) -> TransportResult<(Self::Connection, SocketAddr)>;
+    async fn accept(&mut self) -> TransportResult<Self::Connection>;
 
-    /// Get the local address this listener is bound to
-    fn local_addr(&self) -> TransportResult<SocketAddr>;
+    /// Get the listen address as string
+    fn listen_address(&self) -> String;
 
     /// Close the listener
     async fn close(&mut self) -> TransportResult<()>;

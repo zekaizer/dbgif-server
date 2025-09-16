@@ -116,7 +116,7 @@ mod tests {
         ClientSessionInfo {
             session_id: "test-session".to_string(),
             client_info: ClientInfo {
-                address: "127.0.0.1:12345".parse::<SocketAddr>().unwrap(),
+                connection_id: "tcp://127.0.0.1:12345→127.0.0.1:5555".to_string(),
                 identity: Some("test-client".to_string()),
                 protocol_version: 1,
                 max_data_size: 1024 * 1024,

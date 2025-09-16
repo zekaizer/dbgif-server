@@ -1,7 +1,6 @@
 use async_trait::async_trait;
-use crate::transport::connection::{TransportError, TransportResult};
+use crate::transport::connection::{TransportError, TransportResult, Connection};
 use crate::transport::{TransportConfig};
-use crate::transport::connection::{Connection, ConnectionStats, ConnectionMetadata, ConnectionOptions, ConnectionFeature};
 use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::net::TcpStream;
@@ -9,12 +8,12 @@ use tokio::net::TcpStream;
 /// TCP connection implementation
 pub struct TcpConnection {
     stream: TcpStream,
+    local_addr: SocketAddr,
+    remote_addr: SocketAddr,
     #[allow(dead_code)]
     config: TransportConfig,
-    stats: ConnectionStats,
-    metadata: ConnectionMetadata,
-    options: ConnectionOptions,
     closed: bool,
+    max_message_size: usize,
 }
 
 impl TcpConnection {
@@ -28,29 +27,22 @@ impl TcpConnection {
             TransportError::Other { message: format!("Failed to get remote address: {}", e) }
         })?;
 
-        let mut metadata = ConnectionMetadata::new("tcp");
-        metadata.add_property("local_addr", local_addr.to_string());
-        metadata.add_property("remote_addr", remote_addr.to_string());
+        // Configure TCP options
+        if config.tcp_nodelay {
+            if let Err(e) = stream.set_nodelay(true) {
+                tracing::warn!("Failed to set TCP_NODELAY: {}", e);
+            }
+        }
 
-        let options = ConnectionOptions {
-            read_timeout: Some(Duration::from_secs(30)),
-            write_timeout: Some(Duration::from_secs(30)),
-            keepalive_interval: config.keepalive_interval,
-            tcp_nodelay: config.tcp_nodelay,
-            read_buffer_size: config.buffer_size,
-            write_buffer_size: config.buffer_size,
-            max_message_size: config.max_data_size,
-            enable_compression: false,
-            enable_encryption: false,
-        };
+        let max_message_size = config.max_data_size;
 
         Ok(Self {
             stream,
+            local_addr,
+            remote_addr,
             config,
-            stats: ConnectionStats::new(),
-            metadata,
-            options,
             closed: false,
+            max_message_size,
         })
     }
 
@@ -69,52 +61,15 @@ impl TcpConnection {
         Self::new(stream, TransportConfig::default())
     }
 
-    /// Check if the underlying stream supports a specific socket option
-    pub fn supports_socket_option(&self, option: TcpSocketOption) -> bool {
-        match option {
-            TcpSocketOption::NoDelay => true,
-            TcpSocketOption::KeepAlive => true,
-            TcpSocketOption::Linger => true,
-            TcpSocketOption::ReuseAddr => true,
-            TcpSocketOption::ReusePort => cfg!(target_os = "linux"),
-        }
+    /// Get local address
+    pub fn local_addr(&self) -> SocketAddr {
+        self.local_addr
     }
 
-    /// Configure TCP socket options
-    pub fn configure_socket(&self, options: &[TcpSocketOption]) -> TransportResult<()> {
-        for option in options {
-            match option {
-                TcpSocketOption::NoDelay => {
-                    if let Err(e) = self.stream.set_nodelay(true) {
-                        tracing::warn!("Failed to set TCP_NODELAY: {}", e);
-                    }
-                }
-                TcpSocketOption::KeepAlive => {
-                    // Note: tokio::net::TcpStream doesn't expose SO_KEEPALIVE directly
-                    tracing::debug!("TCP KeepAlive configuration not directly supported");
-                }
-                _ => {
-                    tracing::debug!("Socket option {:?} not implemented", option);
-                }
-            }
-        }
-        Ok(())
+    /// Get remote address
+    pub fn remote_addr(&self) -> SocketAddr {
+        self.remote_addr
     }
-}
-
-/// TCP socket options that can be configured
-#[derive(Debug, Clone, Copy)]
-pub enum TcpSocketOption {
-    /// TCP_NODELAY - disable Nagle's algorithm
-    NoDelay,
-    /// SO_KEEPALIVE - enable keep-alive probes
-    KeepAlive,
-    /// SO_LINGER - control connection close behavior
-    Linger,
-    /// SO_REUSEADDR - allow address reuse
-    ReuseAddr,
-    /// SO_REUSEPORT - allow port reuse (Linux only)
-    ReusePort,
 }
 
 #[async_trait]
@@ -125,21 +80,9 @@ impl Connection for TcpConnection {
         }
 
         use tokio::io::AsyncWriteExt;
-
-        let write_result = if let Some(timeout) = self.options.write_timeout {
-            tokio::time::timeout(timeout, self.stream.write_all(data)).await
-                .map_err(|_| TransportError::Timeout { timeout_ms: timeout.as_millis() as u64 })?
-        } else {
-            self.stream.write_all(data).await
-        };
-
-        write_result.map_err(|e| {
-            self.stats.record_error();
+        self.stream.write_all(data).await.map_err(|e| {
             TransportError::IoError(e)
-        })?;
-
-        self.stats.record_bytes_sent(data.len() as u64);
-        Ok(())
+        })
     }
 
     async fn receive_bytes(&mut self, buffer: &mut [u8]) -> TransportResult<Option<usize>> {
@@ -148,46 +91,47 @@ impl Connection for TcpConnection {
         }
 
         use tokio::io::AsyncReadExt;
-
-        let read_result = if let Some(timeout) = self.options.read_timeout {
-            tokio::time::timeout(timeout, self.stream.read(buffer)).await
-                .map_err(|_| TransportError::Timeout { timeout_ms: timeout.as_millis() as u64 })?
-        } else {
-            self.stream.read(buffer).await
-        };
-
-        match read_result {
+        match self.stream.read(buffer).await {
             Ok(0) => {
                 // EOF - connection closed by peer
                 self.closed = true;
                 Ok(None)
             }
-            Ok(n) => {
-                self.stats.record_bytes_received(n as u64);
-                Ok(Some(n))
-            }
-            Err(e) => {
-                self.stats.record_error();
-                Err(TransportError::IoError(e))
-            }
+            Ok(n) => Ok(Some(n)),
+            Err(e) => Err(TransportError::IoError(e)),
         }
     }
 
-
     async fn send_bytes_timeout(&mut self, data: &[u8], timeout: Duration) -> TransportResult<()> {
-        let original_timeout = self.options.write_timeout;
-        self.options.write_timeout = Some(timeout);
-        let result = self.send_bytes(data).await;
-        self.options.write_timeout = original_timeout;
-        result
+        if self.closed {
+            return Err(TransportError::ConnectionClosed);
+        }
+
+        use tokio::io::AsyncWriteExt;
+        tokio::time::timeout(timeout, self.stream.write_all(data))
+            .await
+            .map_err(|_| TransportError::Timeout { timeout_ms: timeout.as_millis() as u64 })?
+            .map_err(|e| TransportError::IoError(e))
     }
 
     async fn receive_bytes_timeout(&mut self, buffer: &mut [u8], timeout: Duration) -> TransportResult<Option<usize>> {
-        let original_timeout = self.options.read_timeout;
-        self.options.read_timeout = Some(timeout);
-        let result = self.receive_bytes(buffer).await;
-        self.options.read_timeout = original_timeout;
-        result
+        if self.closed {
+            return Err(TransportError::ConnectionClosed);
+        }
+
+        use tokio::io::AsyncReadExt;
+        let result = tokio::time::timeout(timeout, self.stream.read(buffer))
+            .await
+            .map_err(|_| TransportError::Timeout { timeout_ms: timeout.as_millis() as u64 })?;
+
+        match result {
+            Ok(0) => {
+                self.closed = true;
+                Ok(None)
+            }
+            Ok(n) => Ok(Some(n)),
+            Err(e) => Err(TransportError::IoError(e)),
+        }
     }
 
     async fn close(&mut self) -> TransportResult<()> {
@@ -207,68 +151,19 @@ impl Connection for TcpConnection {
         !self.closed
     }
 
-    fn local_addr(&self) -> TransportResult<SocketAddr> {
-        self.stream.local_addr().map_err(|e| {
-            TransportError::Other { message: format!("Failed to get local address: {}", e) }
-        })
-    }
-
-    fn remote_addr(&self) -> TransportResult<SocketAddr> {
-        self.stream.peer_addr().map_err(|e| {
-            TransportError::Other { message: format!("Failed to get remote address: {}", e) }
-        })
-    }
-
-    fn stats(&self) -> ConnectionStats {
-        let mut stats = self.stats.clone();
-        stats.uptime = stats.current_uptime();
-        stats
-    }
-
-    fn reset_stats(&mut self) {
-        self.stats = ConnectionStats::new();
-    }
-
-    fn metadata(&self) -> ConnectionMetadata {
-        self.metadata.clone()
-    }
-
-    async fn set_options(&mut self, options: ConnectionOptions) -> TransportResult<()> {
-        self.options = options;
-
-        // Apply TCP-specific options
-        if let Err(e) = self.stream.set_nodelay(self.options.tcp_nodelay) {
-            tracing::warn!("Failed to set TCP_NODELAY: {}", e);
-        }
-
-        Ok(())
-    }
-
-    fn get_options(&self) -> ConnectionOptions {
-        self.options.clone()
+    fn connection_id(&self) -> String {
+        format!("tcp://{}→{}", self.local_addr, self.remote_addr)
     }
 
     async fn flush(&mut self) -> TransportResult<()> {
         use tokio::io::AsyncWriteExt;
         self.stream.flush().await.map_err(|e| {
-            self.stats.record_error();
             TransportError::IoError(e)
         })
     }
 
     fn max_message_size(&self) -> usize {
-        self.options.max_message_size
-    }
-
-    fn supports_feature(&self, feature: ConnectionFeature) -> bool {
-        match feature {
-            ConnectionFeature::Keepalive => true,
-            ConnectionFeature::Compression => self.options.enable_compression,
-            ConnectionFeature::Encryption => self.options.enable_encryption,
-            ConnectionFeature::Multiplexing => false, // TCP doesn't natively support multiplexing
-            ConnectionFeature::Backpressure => true,
-            ConnectionFeature::GracefulShutdown => true,
-        }
+        self.max_message_size
     }
 }
 
@@ -297,37 +192,49 @@ mod tests {
         assert!(client_conn.is_connected());
         assert!(server_conn.is_connected());
 
-        assert!(client_conn.local_addr().is_ok());
-        assert!(client_conn.remote_addr().is_ok());
+        assert!(!client_conn.connection_id().is_empty());
+        assert!(client_conn.connection_id().starts_with("tcp://"));
     }
 
     #[tokio::test]
-    async fn test_socket_options() {
+    async fn test_connection_id() {
         let (conn, _) = create_test_connection_pair().await.unwrap();
+        let connection_id = conn.connection_id();
 
-        assert!(conn.supports_socket_option(TcpSocketOption::NoDelay));
-        assert!(conn.supports_socket_option(TcpSocketOption::KeepAlive));
-
-        assert!(conn.configure_socket(&[TcpSocketOption::NoDelay]).is_ok());
+        assert!(connection_id.starts_with("tcp://"));
+        assert!(connection_id.contains("→"));
     }
 
     #[tokio::test]
-    async fn test_connection_metadata() {
-        let (conn, _) = create_test_connection_pair().await.unwrap();
+    async fn test_basic_send_receive() {
+        let (mut client, mut server) = create_test_connection_pair().await.unwrap();
 
-        let metadata = conn.metadata();
-        assert_eq!(metadata.connection_type, "tcp");
-        assert!(metadata.get_property("local_addr").is_some());
-        assert!(metadata.get_property("remote_addr").is_some());
+        let test_data = b"Hello, World!";
+        client.send_bytes(test_data).await.unwrap();
+
+        let mut buffer = [0u8; 1024];
+        let n = server.receive_bytes(&mut buffer).await.unwrap().unwrap();
+
+        assert_eq!(n, test_data.len());
+        assert_eq!(&buffer[..n], test_data);
     }
 
     #[tokio::test]
-    async fn test_connection_features() {
-        let (conn, _) = create_test_connection_pair().await.unwrap();
+    async fn test_connection_close() {
+        let (mut client, mut server) = create_test_connection_pair().await.unwrap();
 
-        assert!(conn.supports_feature(ConnectionFeature::Keepalive));
-        assert!(conn.supports_feature(ConnectionFeature::Backpressure));
-        assert!(conn.supports_feature(ConnectionFeature::GracefulShutdown));
-        assert!(!conn.supports_feature(ConnectionFeature::Multiplexing));
+        client.close().await.unwrap();
+        assert!(!client.is_connected());
+
+        // Server should detect the closed connection
+        let mut buffer = [0u8; 1024];
+        let result = server.receive_bytes(&mut buffer).await.unwrap();
+        assert!(result.is_none()); // EOF
+    }
+
+    #[tokio::test]
+    async fn test_max_message_size() {
+        let (conn, _) = create_test_connection_pair().await.unwrap();
+        assert!(conn.max_message_size() > 0);
     }
 }
