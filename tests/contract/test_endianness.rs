@@ -171,21 +171,25 @@ mod tests {
         }
     }
 
-    #[allow(unused_variables)]
-    fn serialize_message_header(_msg: &AdbMessage) -> Vec<u8> {
-        // TODO: Implement in actual message module
-        unimplemented!()
+    fn serialize_message_header(msg: &AdbMessage) -> Vec<u8> {
+        let mut buffer = Vec::with_capacity(24);
+
+        // 24-byte header (all little-endian)
+        buffer.extend_from_slice(&msg.command.to_le_bytes());
+        buffer.extend_from_slice(&msg.arg0.to_le_bytes());
+        buffer.extend_from_slice(&msg.arg1.to_le_bytes());
+        buffer.extend_from_slice(&msg.data_length.to_le_bytes());
+        buffer.extend_from_slice(&msg.data_crc32.to_le_bytes());
+        buffer.extend_from_slice(&msg.magic.to_le_bytes());
+
+        buffer
     }
 
-    #[allow(unused_variables)]
     fn process_data_payload(data: &[u8]) -> Vec<u8> {
-        // TODO: Implement in actual message module
         data.to_vec() // Data should not be modified
     }
 
-    #[allow(unused_variables)]
-    fn serialize_to_wire_format(_msg: &AdbMessage) -> Vec<u8> {
-        // TODO: Implement in actual message module
-        unimplemented!()
+    fn serialize_to_wire_format(msg: &AdbMessage) -> Vec<u8> {
+        msg.serialize()
     }
 }

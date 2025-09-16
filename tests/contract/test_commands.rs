@@ -123,21 +123,18 @@ mod tests {
     }
 
     // Helper function stubs - these should be implemented in the actual code
-    #[allow(unused_variables)]
-    fn is_valid_command(_command: u32) -> bool {
-        // TODO: Implement in actual command module
-        unimplemented!()
+    fn is_valid_command(command: u32) -> bool {
+        AdbCommand::from_u32(command).is_some()
     }
 
-    #[allow(unused_variables)]
-    fn calculate_magic(_command: u32) -> u32 {
-        // TODO: Implement in actual command module
-        unimplemented!()
+    fn calculate_magic(command: u32) -> u32 {
+        !command
     }
 
-    #[allow(unused_variables)]
-    fn command_to_string(_command: u32) -> &'static str {
-        // TODO: Implement in actual command module
-        unimplemented!()
+    fn command_to_string(command: u32) -> &'static str {
+        match AdbCommand::from_u32(command) {
+            Some(cmd) => cmd.as_str(),
+            None => "UNKNOWN",
+        }
     }
 }
