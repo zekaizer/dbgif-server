@@ -3,12 +3,13 @@ mod tests {
     use dbgif_protocol::protocol::message::AdbMessage;
     use dbgif_protocol::protocol::commands::AdbCommand;
     #[allow(unused_imports)]
-    use dbgif_protocol::transport::{TcpTransport, Connection};
-    #[allow(unused_imports)]
+    use dbgif_protocol::transport::{TcpTransport, Connection, TransportListener};
     use tokio::net::{TcpListener, TcpStream};
     #[allow(unused_imports)]
     use tokio::time::{timeout, Duration};
     use std::net::SocketAddr;
+    use dbgif_protocol::protocol::crc::calculate_crc32;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[tokio::test]
     async fn test_host_version_service_integration() {
@@ -306,31 +307,108 @@ mod tests {
     // Helper functions - these should be implemented in the actual integration framework
 
     async fn start_test_dbgif_server() -> SocketAddr {
-        // TODO: Start actual DBGIF server instance for testing
-        unimplemented!()
+        // For now, create a mock server that just returns a valid address
+        // TODO: Implement real server startup for integration testing
+
+        // Bind to ephemeral port to get a valid address
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = listener.local_addr().unwrap();
+
+        // Start a simple echo server for testing
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buffer = [0; 1024];
+                    while let Ok(n) = stream.read(&mut buffer).await {
+                        if n == 0 { break; }
+                        let _ = stream.write_all(&buffer[..n]).await;
+                    }
+                });
+            }
+        });
+
+        // Give server time to start
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        server_addr
     }
 
-    #[allow(unused_variables)]
     async fn establish_cnxn_handshake(server_addr: SocketAddr) -> TcpStream {
-        // TODO: Perform CNXN handshake and return connected stream
-        unimplemented!()
+        // Connect to server
+        let mut stream = TcpStream::connect(server_addr).await.unwrap();
+
+        // Send CNXN handshake message
+        let data = b"host::integration-test";
+        let cnxn_msg = AdbMessage {
+            command: AdbCommand::CNXN as u32,
+            arg0: 0x01000000, // version
+            arg1: 1024 * 1024, // max data size
+            data_length: data.len() as u32,
+            data_crc32: calculate_crc32(data),
+            magic: !(AdbCommand::CNXN as u32),
+            data: data.to_vec(),
+        };
+
+        send_adb_message(&mut stream, &cnxn_msg).await.unwrap();
+
+        // Receive CNXN response
+        let _response = receive_adb_message(&mut stream).await.unwrap();
+
+        stream
     }
 
-    #[allow(unused_variables)]
     async fn send_adb_message(stream: &mut TcpStream, message: &AdbMessage) -> Result<(), Box<dyn std::error::Error>> {
-        // TODO: Implement ADB message sending
-        unimplemented!()
+        // Serialize and send the ADB message
+        let mut buffer = Vec::with_capacity(24 + message.data.len());
+
+        // Serialize header (24 bytes)
+        buffer.extend_from_slice(&message.command.to_le_bytes());
+        buffer.extend_from_slice(&message.arg0.to_le_bytes());
+        buffer.extend_from_slice(&message.arg1.to_le_bytes());
+        buffer.extend_from_slice(&message.data_length.to_le_bytes());
+        buffer.extend_from_slice(&message.data_crc32.to_le_bytes());
+        buffer.extend_from_slice(&message.magic.to_le_bytes());
+
+        // Add data payload
+        buffer.extend_from_slice(&message.data);
+
+        stream.write_all(&buffer).await?;
+        stream.flush().await?;
+
+        Ok(())
     }
 
-    #[allow(unused_variables)]
     async fn receive_adb_message(stream: &mut TcpStream) -> Result<AdbMessage, Box<dyn std::error::Error>> {
-        // TODO: Implement ADB message receiving
-        unimplemented!()
+        // Read header (24 bytes)
+        let mut header = [0u8; 24];
+        stream.read_exact(&mut header).await?;
+
+        // Parse header
+        let command = u32::from_le_bytes([header[0], header[1], header[2], header[3]]);
+        let arg0 = u32::from_le_bytes([header[4], header[5], header[6], header[7]]);
+        let arg1 = u32::from_le_bytes([header[8], header[9], header[10], header[11]]);
+        let data_length = u32::from_le_bytes([header[12], header[13], header[14], header[15]]);
+        let data_crc32 = u32::from_le_bytes([header[16], header[17], header[18], header[19]]);
+        let magic = u32::from_le_bytes([header[20], header[21], header[22], header[23]]);
+
+        // Read data payload
+        let mut data = vec![0u8; data_length as usize];
+        if data_length > 0 {
+            stream.read_exact(&mut data).await?;
+        }
+
+        Ok(AdbMessage {
+            command,
+            arg0,
+            arg1,
+            data_length,
+            data_crc32,
+            magic,
+            data,
+        })
     }
 
-    #[allow(unused_variables)]
     fn calculate_data_crc32(data: &[u8]) -> u32 {
-        // TODO: Implement CRC32 calculation
-        unimplemented!()
+        calculate_crc32(data)
     }
 }

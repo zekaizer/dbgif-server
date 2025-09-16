@@ -5,10 +5,12 @@ mod tests {
     #[allow(unused_imports)]
     use dbgif_protocol::transport::{TcpTransport, Connection};
     #[allow(unused_imports)]
-    use tokio::net::{TcpListener, TcpStream};
+    use tokio::net::TcpStream;
     #[allow(unused_imports)]
     use tokio::time::{timeout, Duration};
-    use std::net::SocketAddr;
+
+    // Import common test helpers
+    use crate::common::*;
 
     #[tokio::test]
     async fn test_stream_open_okay_flow() {
@@ -305,40 +307,8 @@ mod tests {
         let (_local_id, _remote_id) = establish_stream(&mut client_stream, b"recovery-test").await;
     }
 
-    // Helper functions - these should be implemented in the actual integration framework
-
-    async fn start_test_dbgif_server() -> SocketAddr {
-        // TODO: Start actual DBGIF server instance for testing
-        unimplemented!()
-    }
-
-    #[allow(unused_variables)]
-    async fn establish_cnxn_handshake(server_addr: SocketAddr) -> TcpStream {
-        // TODO: Perform CNXN handshake and return connected stream
-        unimplemented!()
-    }
-
-    #[allow(unused_variables)]
-    async fn establish_stream(client_stream: &mut TcpStream, service_name: &[u8]) -> (u32, u32) {
-        // TODO: Perform OPEN → OKAY handshake and return (local_id, remote_id)
-        unimplemented!()
-    }
-
-    #[allow(unused_variables)]
-    async fn send_adb_message(stream: &mut TcpStream, message: &AdbMessage) -> Result<(), Box<dyn std::error::Error>> {
-        // TODO: Implement ADB message sending
-        unimplemented!()
-    }
-
-    #[allow(unused_variables)]
-    async fn receive_adb_message(stream: &mut TcpStream) -> Result<AdbMessage, Box<dyn std::error::Error>> {
-        // TODO: Implement ADB message receiving
-        unimplemented!()
-    }
-
-    #[allow(unused_variables)]
-    fn calculate_data_crc32(data: &[u8]) -> u32 {
-        // TODO: Implement CRC32 calculation
-        unimplemented!()
-    }
 }
+
+// Include common test helpers module
+#[path = "../common/mod.rs"]
+mod common;
