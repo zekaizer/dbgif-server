@@ -1,0 +1,12 @@
+[build]
+rustflags = ["-D", "warnings"]
+
+[target.'cfg(all())']
+rustflags = ["-D", "warnings"]
+
+[clippy]
+# Enable additional clippy lints
+all-features = true
+
+[env]
+RUST_BACKTRACE = { value = "1", condition = { env-not-set = "RUST_BACKTRACE" } }

@@ -1,0 +1,34 @@
+[package]
+name = "dbgif-protocol"
+version = "0.1.0"
+edition = "2021"
+authors = ["DBGIF Team"]
+license = "MIT"
+repository = "https://github.com/your-org/dbgif-server"
+
+[dependencies]
+tokio = { version = "1.0", features = ["full"] }
+crc32fast = "1.4"
+thiserror = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4.0", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+
+[[bin]]
+name = "dbgif-server"
+path = "src/bin/dbgif-server.rs"
+
+[[bin]]
+name = "dbgif-test-client"
+path = "src/bin/dbgif-test-client.rs"
+
+[[bin]]
+name = "tcp-device-test-server"
+path = "src/bin/tcp-device-test-server.rs"
+
+[lib]
+name = "dbgif_protocol"
+path = "src/lib.rs"
