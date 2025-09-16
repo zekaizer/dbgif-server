@@ -73,11 +73,11 @@
 - [x] T025 [P] DeviceRegistry struct in src/server/device_registry.rs
 - [x] T026 [P] ClientSession management in src/server/session.rs
 - [x] T027 [P] StreamInfo and mapping in src/server/stream.rs
-- [ ] T028 [P] HostService trait in src/host_services/mod.rs
-- [ ] T029 [P] HostListService implementation in src/host_services/list.rs
-- [ ] T030 [P] HostDeviceService implementation in src/host_services/device.rs
-- [ ] T031 [P] HostVersionService implementation in src/host_services/version.rs
-- [ ] T032 [P] HostFeaturesService implementation in src/host_services/features.rs
+- [x] T028 [P] HostService trait in src/host_services/mod.rs
+- [x] T029 [P] HostListService implementation in src/host_services/list.rs
+- [x] T030 [P] HostDeviceService implementation in src/host_services/device.rs
+- [x] T031 [P] HostVersionService implementation in src/host_services/version.rs
+- [x] T032 [P] HostFeaturesService implementation in src/host_services/features.rs
 - [ ] T033 ServerState and configuration in src/server/state.rs
 - [ ] T034 Command dispatch and message routing in src/server/dispatcher.rs
 - [ ] T035 Connection lifecycle management in src/server/connection_manager.rs
