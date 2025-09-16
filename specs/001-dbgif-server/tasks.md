@@ -44,16 +44,16 @@
 - [x] T001 Create Rust workspace structure with Cargo.toml and crate organization
 - [x] T002 Initialize dependencies: tokio, crc32fast, thiserror, tracing, clap, serde
 - [x] T003 [P] Configure clippy and rustfmt in .cargo/config.toml
-- [ ] T004 [P] Setup CI workflow in .github/workflows/rust.yml
+- ~~[ ] T004 [P] Setup CI workflow in .github/workflows/rust.yml~~
 
 ## Phase 3.2: Tests First (TDD) ⚠️ MUST COMPLETE BEFORE 3.3
 **CRITICAL: These tests MUST be written and MUST FAIL before ANY implementation**
-- [ ] T005 [P] ADB message serialization contract test in tests/contract/test_adb_message.rs
-- [ ] T006 [P] CRC32 validation contract test in tests/contract/test_crc32.rs
-- [ ] T007 [P] Command enum contract test in tests/contract/test_commands.rs
-- [ ] T008 [P] Little-endian encoding contract test in tests/contract/test_endianness.rs
-- [ ] T009 [P] TCP transport contract test in tests/contract/test_tcp_transport.rs
-- [ ] T010 [P] Host service registry contract test in tests/contract/test_host_services.rs
+- [x] T005 [P] ADB message serialization contract test in tests/contract/test_adb_message.rs
+- [x] T006 [P] CRC32 validation contract test in tests/contract/test_crc32.rs
+- [x] T007 [P] Command enum contract test in tests/contract/test_commands.rs
+- [x] T008 [P] Little-endian encoding contract test in tests/contract/test_endianness.rs
+- [x] T009 [P] TCP transport contract test in tests/contract/test_tcp_transport.rs
+- [x] T010 [P] Host service registry contract test in tests/contract/test_host_services.rs
 - [ ] T011 [P] Integration test: CNXN handshake in tests/integration/test_connection.rs
 - [ ] T012 [P] Integration test: host services in tests/integration/test_host_services.rs
 - [ ] T013 [P] Integration test: stream lifecycle in tests/integration/test_streams.rs

@@ -1,5 +1,8 @@
+#[allow(unused_imports)]
 use clap::Parser;
+#[allow(unused_imports)]
 use tracing::{info, error};
+#[allow(unused_imports)]
 use dbgif_protocol;
 
 #[derive(Parser)]
@@ -15,7 +18,7 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::init();
+    tracing_subscriber::fmt::init();
 
     let args = Args::parse();
 
