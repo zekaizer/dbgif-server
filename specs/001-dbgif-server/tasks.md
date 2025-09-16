@@ -70,9 +70,9 @@
 - [x] T022 [P] Connection trait definition in src/transport/connection.rs
 - [x] T023 [P] TcpTransport implementation in src/transport/tcp.rs
 - [x] T024 [P] TcpConnection implementation in src/transport/tcp_connection.rs
-- [ ] T025 [P] DeviceRegistry struct in src/server/device_registry.rs
-- [ ] T026 [P] ClientSession management in src/server/session.rs
-- [ ] T027 [P] StreamInfo and mapping in src/server/stream.rs
+- [x] T025 [P] DeviceRegistry struct in src/server/device_registry.rs
+- [x] T026 [P] ClientSession management in src/server/session.rs
+- [x] T027 [P] StreamInfo and mapping in src/server/stream.rs
 - [ ] T028 [P] HostService trait in src/host_services/mod.rs
 - [ ] T029 [P] HostListService implementation in src/host_services/list.rs
 - [ ] T030 [P] HostDeviceService implementation in src/host_services/device.rs
