@@ -78,11 +78,11 @@
 - [x] T030 [P] HostDeviceService implementation in src/host_services/device.rs
 - [x] T031 [P] HostVersionService implementation in src/host_services/version.rs
 - [x] T032 [P] HostFeaturesService implementation in src/host_services/features.rs
-- [ ] T033 ServerState and configuration in src/server/state.rs
-- [ ] T034 Command dispatch and message routing in src/server/dispatcher.rs
-- [ ] T035 Connection lifecycle management in src/server/connection_manager.rs
-- [ ] T036 Stream forwarding logic in src/server/stream_forwarder.rs
-- [ ] T037 Device discovery and lazy connection in src/server/device_manager.rs
+- [x] T033 ServerState and configuration in src/server/state.rs
+- [x] T034 Command dispatch and message routing in src/server/dispatcher.rs
+- [x] T035 Connection lifecycle management in src/server/connection_manager.rs
+- [x] T036 Stream forwarding logic in src/server/stream_forwarder.rs
+- [x] T037 Device discovery and lazy connection in src/server/device_manager.rs
 
 ## Phase 3.4: Applications
 - [ ] T038 DBGIF server binary with CLI in src/bin/dbgif-server.rs

@@ -3,11 +3,10 @@ pub mod tcp;
 pub mod tcp_connection;
 
 use async_trait::async_trait;
-use crate::transport::connection::TransportResult;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-pub use connection::Connection;
+pub use connection::{Connection, TransportResult, TransportError};
 pub use tcp::TcpTransport;
 pub use tcp_connection::TcpConnection;
 
