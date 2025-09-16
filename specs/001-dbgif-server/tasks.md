@@ -66,10 +66,10 @@
 - [x] T018 [P] AdbCommand enum with constants in src/protocol/commands.rs
 - [x] T019 [P] CRC32 validation implementation in src/protocol/crc.rs
 - [x] T020 [P] ProtocolError types in src/protocol/error.rs
-- [ ] T021 [P] Transport trait definition in src/transport/mod.rs
-- [ ] T022 [P] Connection trait definition in src/transport/connection.rs
-- [ ] T023 [P] TcpTransport implementation in src/transport/tcp.rs
-- [ ] T024 [P] TcpConnection implementation in src/transport/tcp_connection.rs
+- [x] T021 [P] Transport trait definition in src/transport/mod.rs
+- [x] T022 [P] Connection trait definition in src/transport/connection.rs
+- [x] T023 [P] TcpTransport implementation in src/transport/tcp.rs
+- [x] T024 [P] TcpConnection implementation in src/transport/tcp_connection.rs
 - [ ] T025 [P] DeviceRegistry struct in src/server/device_registry.rs
 - [ ] T026 [P] ClientSession management in src/server/session.rs
 - [ ] T027 [P] StreamInfo and mapping in src/server/stream.rs
