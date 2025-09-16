@@ -62,10 +62,10 @@
 - [x] T016 [P] Performance test: 100 connections in tests/integration/test_performance.rs
 
 ## Phase 3.3: Core Implementation (ONLY after tests are failing)
-- [ ] T017 [P] AdbMessage struct with serialization in src/protocol/message.rs
-- [ ] T018 [P] AdbCommand enum with constants in src/protocol/commands.rs
-- [ ] T019 [P] CRC32 validation implementation in src/protocol/crc.rs
-- [ ] T020 [P] ProtocolError types in src/protocol/error.rs
+- [x] T017 [P] AdbMessage struct with serialization in src/protocol/message.rs
+- [x] T018 [P] AdbCommand enum with constants in src/protocol/commands.rs
+- [x] T019 [P] CRC32 validation implementation in src/protocol/crc.rs
+- [x] T020 [P] ProtocolError types in src/protocol/error.rs
 - [ ] T021 [P] Transport trait definition in src/transport/mod.rs
 - [ ] T022 [P] Connection trait definition in src/transport/connection.rs
 - [ ] T023 [P] TcpTransport implementation in src/transport/tcp.rs
