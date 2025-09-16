@@ -85,9 +85,9 @@
 - [x] T037 Device discovery and lazy connection in src/server/device_manager.rs
 
 ## Phase 3.4: Applications
-- [ ] T038 DBGIF server binary with CLI in src/bin/dbgif-server.rs
-- [ ] T039 Test client binary with CLI in src/bin/dbgif-test-client.rs
-- [ ] T040 TCP device test server in src/bin/tcp-device-test-server.rs
+- [x] T038 DBGIF server binary with CLI in src/bin/dbgif-server.rs
+- [x] T039 Test client binary with CLI in src/bin/dbgif-test-client.rs
+- [x] T040 TCP device test server in src/bin/tcp-device-test-server.rs
 - [ ] T041 Configuration parsing and validation in src/config.rs
 - [ ] T042 Logging and tracing setup in src/logging.rs
 - [ ] T043 Error handling and graceful shutdown in src/server/shutdown.rs
