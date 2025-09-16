@@ -57,3 +57,27 @@ path = "tests/contract/test_tcp_transport.rs"
 [[test]]
 name = "test_host_services"
 path = "tests/contract/test_host_services.rs"
+
+[[test]]
+name = "test_connection"
+path = "tests/integration/test_connection.rs"
+
+[[test]]
+name = "integration_host_services"
+path = "tests/integration/test_host_services.rs"
+
+[[test]]
+name = "test_streams"
+path = "tests/integration/test_streams.rs"
+
+[[test]]
+name = "test_device_forwarding"
+path = "tests/integration/test_device_forwarding.rs"
+
+[[test]]
+name = "test_multi_client"
+path = "tests/integration/test_multi_client.rs"
+
+[[test]]
+name = "test_performance"
+path = "tests/integration/test_performance.rs"

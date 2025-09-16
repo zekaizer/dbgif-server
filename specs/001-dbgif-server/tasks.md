@@ -54,12 +54,12 @@
 - [x] T008 [P] Little-endian encoding contract test in tests/contract/test_endianness.rs
 - [x] T009 [P] TCP transport contract test in tests/contract/test_tcp_transport.rs
 - [x] T010 [P] Host service registry contract test in tests/contract/test_host_services.rs
-- [ ] T011 [P] Integration test: CNXN handshake in tests/integration/test_connection.rs
-- [ ] T012 [P] Integration test: host services in tests/integration/test_host_services.rs
-- [ ] T013 [P] Integration test: stream lifecycle in tests/integration/test_streams.rs
-- [ ] T014 [P] Integration test: device forwarding in tests/integration/test_device_forwarding.rs
-- [ ] T015 [P] Integration test: multi-client access in tests/integration/test_multi_client.rs
-- [ ] T016 [P] Performance test: 100 connections in tests/integration/test_performance.rs
+- [x] T011 [P] Integration test: CNXN handshake in tests/integration/test_connection.rs
+- [x] T012 [P] Integration test: host services in tests/integration/test_host_services.rs
+- [x] T013 [P] Integration test: stream lifecycle in tests/integration/test_streams.rs
+- [x] T014 [P] Integration test: device forwarding in tests/integration/test_device_forwarding.rs
+- [x] T015 [P] Integration test: multi-client access in tests/integration/test_multi_client.rs
+- [x] T016 [P] Performance test: 100 connections in tests/integration/test_performance.rs
 
 ## Phase 3.3: Core Implementation (ONLY after tests are failing)
 - [ ] T017 [P] AdbMessage struct with serialization in src/protocol/message.rs
