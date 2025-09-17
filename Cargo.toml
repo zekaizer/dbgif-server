@@ -1,6 +1,8 @@
 [workspace]
 members = [
-    ".",
+    "dbgif-protocol",
+    "dbgif-transport",
+    "dbgif-server",
     "dbgif-integrated-test",
 ]
 resolver = "2"
@@ -20,93 +22,3 @@ toml = "0.8"
 crc32fast = "1.4"
 uuid = { version = "1.0", features = ["v4"] }
 rand = "0.8"
-
-[package]
-name = "dbgif-protocol"
-version = "0.1.0"
-edition = "2021"
-authors = ["DBGIF Team"]
-license = "MIT"
-repository = "https://github.com/your-org/dbgif-server"
-
-[dependencies]
-tokio = { workspace = true }
-crc32fast = { workspace = true }
-thiserror = { workspace = true }
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
-clap = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-toml = { workspace = true }
-anyhow = { workspace = true }
-async-trait = { workspace = true }
-uuid = { workspace = true }
-rand = { workspace = true }
-
-[dev-dependencies]
-tempfile = "3.0"
-
-[[bin]]
-name = "dbgif-server"
-path = "src/bin/dbgif-server.rs"
-
-[[bin]]
-name = "dbgif-test-client"
-path = "src/bin/dbgif-test-client.rs"
-
-[[bin]]
-name = "tcp-device-test-server"
-path = "src/bin/tcp-device-test-server.rs"
-
-[lib]
-name = "dbgif_protocol"
-path = "src/lib.rs"
-
-[[test]]
-name = "test_adb_message"
-path = "tests/contract/test_adb_message.rs"
-
-[[test]]
-name = "test_crc32"
-path = "tests/contract/test_crc32.rs"
-
-[[test]]
-name = "test_commands"
-path = "tests/contract/test_commands.rs"
-
-[[test]]
-name = "test_endianness"
-path = "tests/contract/test_endianness.rs"
-
-[[test]]
-name = "test_tcp_transport"
-path = "tests/contract/test_tcp_transport.rs"
-
-[[test]]
-name = "test_host_services"
-path = "tests/contract/test_host_services.rs"
-
-[[test]]
-name = "test_connection"
-path = "tests/integration/test_connection.rs"
-
-[[test]]
-name = "integration_host_services"
-path = "tests/integration/test_host_services.rs"
-
-[[test]]
-name = "test_streams"
-path = "tests/integration/test_streams.rs"
-
-[[test]]
-name = "test_device_forwarding"
-path = "tests/integration/test_device_forwarding.rs"
-
-[[test]]
-name = "test_multi_client"
-path = "tests/integration/test_multi_client.rs"
-
-[[test]]
-name = "test_performance"
-path = "tests/integration/test_performance.rs"

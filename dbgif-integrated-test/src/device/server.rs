@@ -1,5 +1,5 @@
 use anyhow::Result;
-use dbgif_protocol::protocol::{
+use dbgif_protocol::{
     commands::AdbCommand,
     message::AdbMessage,
 };

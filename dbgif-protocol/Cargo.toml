@@ -1,0 +1,15 @@
+[package]
+name = "dbgif-protocol"
+version = "0.1.0"
+edition = "2021"
+authors = ["DBGIF Team"]
+license = "MIT"
+repository = "https://github.com/your-org/dbgif-server"
+
+[dependencies]
+crc32fast = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

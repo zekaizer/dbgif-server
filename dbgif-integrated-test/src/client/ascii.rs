@@ -1,5 +1,5 @@
 use anyhow::Result;
-use dbgif_protocol::protocol::ascii;
+use dbgif_protocol::ascii;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tracing::{debug, info};
