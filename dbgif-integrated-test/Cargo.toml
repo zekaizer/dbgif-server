@@ -1,0 +1,29 @@
+[package]
+name = "dbgif-integrated-test"
+version = "0.1.0"
+edition = "2021"
+authors = ["DBGIF Team"]
+license = "MIT"
+
+[dependencies]
+dbgif-protocol = { path = "../" }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_yaml = { workspace = true }
+uuid = { workspace = true }
+rand = { workspace = true }
+crc32fast = { workspace = true }
+
+[[bin]]
+name = "dbgif-integrated-test"
+path = "src/bin/dbgif-integrated-test.rs"
+
+[dev-dependencies]
+mockall = "0.13"
+tokio-test = "0.4"

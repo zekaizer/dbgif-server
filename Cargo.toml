@@ -1,3 +1,26 @@
+[workspace]
+members = [
+    ".",
+    "dbgif-integrated-test",
+]
+resolver = "2"
+
+[workspace.dependencies]
+tokio = { version = "1.0", features = ["full"] }
+async-trait = "0.1"
+thiserror = "1.0"
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4.0", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+toml = "0.8"
+crc32fast = "1.4"
+uuid = { version = "1.0", features = ["v4"] }
+rand = "0.8"
+
 [package]
 name = "dbgif-protocol"
 version = "0.1.0"
@@ -7,19 +30,19 @@ license = "MIT"
 repository = "https://github.com/your-org/dbgif-server"
 
 [dependencies]
-tokio = { version = "1.0", features = ["full"] }
-crc32fast = "1.4"
-thiserror = "1.0"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-clap = { version = "4.0", features = ["derive"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-toml = "0.8"
-anyhow = "1.0"
-async-trait = "0.1"
-uuid = { version = "1.0", features = ["v4"] }
-rand = "0.8"
+tokio = { workspace = true }
+crc32fast = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+uuid = { workspace = true }
+rand = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3.0"
