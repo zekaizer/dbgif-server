@@ -16,7 +16,6 @@ pub struct DeviceServer {
     device_id: String,
     device_model: String,
     capabilities: Vec<String>,
-    listener: Option<TcpListener>,
     handle: Option<JoinHandle<Result<()>>>,
     shutdown_tx: Option<mpsc::Sender<()>>,
     port: u16,
@@ -28,7 +27,6 @@ impl DeviceServer {
             device_id,
             device_model: "DBGIF-TestDevice".to_string(),
             capabilities: vec!["shell".to_string(), "file".to_string(), "debug".to_string()],
-            listener: None,
             handle: None,
             shutdown_tx: None,
             port: 0,
@@ -126,10 +124,9 @@ async fn handle_connection(
 
     // Simple CNXN handshake simulation
     let connect_string = format!("device:{}:model={}", device_id, device_model);
-    let cnxn = AdbMessage::new_cnxn(0x01000000, 4096, &connect_string);
+    let cnxn = AdbMessage::new_cnxn(0x01000000, 4096, connect_string.into_bytes());
 
-    let mut buffer = Vec::new();
-    cnxn.write(&mut buffer)?;
+    let buffer = cnxn.serialize();
     stream.write_all(&buffer).await?;
 
     // Connection handling loop
@@ -146,16 +143,16 @@ async fn handle_connection(
 
         // Try to parse ADB message
         if n >= 24 {
-            match AdbMessage::read(&message_buffer[..n]) {
+            match AdbMessage::deserialize(&message_buffer[..n]) {
                 Ok(msg) => {
                     debug!("Device {} received: {:?}", device_id, msg.command);
 
                     match msg.command {
-                        AdbCommand::CNXN => {
+                        x if x == AdbCommand::CNXN as u32 => {
                             // Already sent CNXN, this is server's CNXN
                             debug!("Received CNXN from server");
                         }
-                        AdbCommand::OPEN => {
+                        x if x == AdbCommand::OPEN as u32 => {
                             // Handle OPEN command
                             let service = String::from_utf8_lossy(&msg.data);
                             let local_id = next_local_id;
@@ -165,33 +162,29 @@ async fn handle_connection(
 
                             // Send OKAY response
                             let okay = AdbMessage::new_okay(local_id, msg.arg0);
-                            let mut response = Vec::new();
-                            okay.write(&mut response)?;
+                            let response = okay.serialize();
                             stream.write_all(&response).await?;
 
                             debug!("Opened stream {} for service: {}", local_id, service);
                         }
-                        AdbCommand::WRTE => {
+                        x if x == AdbCommand::WRTE as u32 => {
                             // Echo back the data (simple echo service)
-                            let echo_msg = AdbMessage::new_wrte(msg.arg1, msg.arg0, &msg.data);
-                            let mut response = Vec::new();
-                            echo_msg.write(&mut response)?;
+                            let echo_msg = AdbMessage::new_wrte(msg.arg1, msg.arg0, msg.data.clone());
+                            let response = echo_msg.serialize();
                             stream.write_all(&response).await?;
 
                             // Send OKAY
                             let okay = AdbMessage::new_okay(msg.arg1, msg.arg0);
-                            let mut okay_response = Vec::new();
-                            okay.write(&mut okay_response)?;
+                            let okay_response = okay.serialize();
                             stream.write_all(&okay_response).await?;
                         }
-                        AdbCommand::CLSE => {
+                        x if x == AdbCommand::CLSE as u32 => {
                             // Handle close
                             streams.remove(&msg.arg0);
 
                             // Send CLSE response
                             let close = AdbMessage::new_clse(msg.arg1, msg.arg0);
-                            let mut response = Vec::new();
-                            close.write(&mut response)?;
+                            let response = close.serialize();
                             stream.write_all(&response).await?;
 
                             debug!("Closed stream {}", msg.arg0);
