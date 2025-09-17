@@ -26,8 +26,11 @@ mod tests {
         let device_service = format!("host:device:{}", device_id);
         let (_local_id, _remote_id) = establish_stream(&mut client_stream, device_service.as_bytes()).await;
 
-        // Device selection should succeed
-        let selection_response = receive_adb_message(&mut client_stream).await.unwrap();
+        // Device selection should succeed with timeout
+        let selection_response = timeout(
+            Duration::from_secs(5),
+            receive_adb_message(&mut client_stream)
+        ).await.unwrap().unwrap();
         assert_eq!(selection_response.command, AdbCommand::WRTE as u32);
 
         let response_str = String::from_utf8_lossy(&selection_response.data);
@@ -50,12 +53,18 @@ mod tests {
 
         send_adb_message(&mut client_stream, &write_msg).await.unwrap();
 
-        // Should receive OKAY acknowledgment from server
-        let okay_response = receive_adb_message(&mut client_stream).await.unwrap();
+        // Should receive OKAY acknowledgment from server with timeout
+        let okay_response = timeout(
+            Duration::from_secs(5),
+            receive_adb_message(&mut client_stream)
+        ).await.unwrap().unwrap();
         assert_eq!(okay_response.command, AdbCommand::OKAY as u32);
 
-        // Should receive forwarded response from device
-        let device_response = receive_adb_message(&mut client_stream).await.unwrap();
+        // Should receive forwarded response from device with timeout
+        let device_response = timeout(
+            Duration::from_secs(5),
+            receive_adb_message(&mut client_stream)
+        ).await.unwrap().unwrap();
         assert_eq!(device_response.command, AdbCommand::WRTE as u32);
         assert_eq!(device_response.arg0, forward_remote_id);
         assert_eq!(device_response.arg1, forward_local_id);
@@ -84,8 +93,11 @@ mod tests {
 
         send_adb_message(&mut client_stream, &open_msg).await.unwrap();
 
-        // Should receive CLSE (error) since no device selected
-        let response = receive_adb_message(&mut client_stream).await.unwrap();
+        // Should receive CLSE (error) since no device selected with timeout
+        let response = timeout(
+            Duration::from_secs(5),
+            receive_adb_message(&mut client_stream)
+        ).await.unwrap().unwrap();
         assert_eq!(response.command, AdbCommand::CLSE as u32);
         assert_eq!(response.arg0, 1); // our local stream id
     }
@@ -113,8 +125,11 @@ mod tests {
         let okay_response = receive_adb_message(&mut client_stream).await.unwrap();
         assert_eq!(okay_response.command, AdbCommand::OKAY as u32);
 
-        // Should receive error response for device selection
-        let error_response = receive_adb_message(&mut client_stream).await.unwrap();
+        // Should receive error response for device selection with timeout
+        let error_response = timeout(
+            Duration::from_secs(5),
+            receive_adb_message(&mut client_stream)
+        ).await.unwrap().unwrap();
         assert_eq!(error_response.command, AdbCommand::WRTE as u32);
 
         let error_str = String::from_utf8_lossy(&error_response.data);
@@ -123,8 +138,11 @@ mod tests {
         // Try to use device service - should fail
         let (_service_local_id, _) = establish_stream(&mut client_stream, b"shell:echo").await;
 
-        // Server should close the stream since device not available
-        let close_response = receive_adb_message(&mut client_stream).await.unwrap();
+        // Server should close the stream since device not available with timeout
+        let close_response = timeout(
+            Duration::from_secs(5),
+            receive_adb_message(&mut client_stream)
+        ).await.unwrap().unwrap();
         assert_eq!(close_response.command, AdbCommand::CLSE as u32);
     }
 
@@ -163,9 +181,12 @@ mod tests {
             send_adb_message(&mut client_stream, &write_msg).await.unwrap();
         }
 
-        // Receive responses (order may vary due to async processing)
+        // Receive responses (order may vary due to async processing) with timeout
         for _ in 0..device_streams.len() {
-            let okay_response = receive_adb_message(&mut client_stream).await.unwrap();
+            let okay_response = timeout(
+                Duration::from_secs(5),
+                receive_adb_message(&mut client_stream)
+            ).await.unwrap().unwrap();
             assert_eq!(okay_response.command, AdbCommand::OKAY as u32);
 
             // Verify response belongs to one of our streams
@@ -206,8 +227,11 @@ mod tests {
 
         send_adb_message(&mut client_stream, &write_msg).await.unwrap();
 
-        // Should receive CLSE indicating device disconnection
-        let response = receive_adb_message(&mut client_stream).await.unwrap();
+        // Should receive CLSE indicating device disconnection with timeout
+        let response = timeout(
+            Duration::from_secs(5),
+            receive_adb_message(&mut client_stream)
+        ).await.unwrap().unwrap();
         assert_eq!(response.command, AdbCommand::CLSE as u32);
         assert_eq!(response.arg0, forward_remote_id);
         assert_eq!(response.arg1, forward_local_id);
@@ -243,12 +267,18 @@ mod tests {
 
         send_adb_message(&mut client_stream, &write_msg).await.unwrap();
 
-        // Receive OKAY
-        let okay_response = receive_adb_message(&mut client_stream).await.unwrap();
+        // Receive OKAY with timeout
+        let okay_response = timeout(
+            Duration::from_secs(5),
+            receive_adb_message(&mut client_stream)
+        ).await.unwrap().unwrap();
         assert_eq!(okay_response.command, AdbCommand::OKAY as u32);
 
-        // Receive echoed data from device
-        let echo_response = receive_adb_message(&mut client_stream).await.unwrap();
+        // Receive echoed data from device with timeout
+        let echo_response = timeout(
+            Duration::from_secs(5),
+            receive_adb_message(&mut client_stream)
+        ).await.unwrap().unwrap();
         assert_eq!(echo_response.command, AdbCommand::WRTE as u32);
         assert_eq!(echo_response.data, binary_data);
         assert_eq!(echo_response.data_crc32, expected_crc);
@@ -268,8 +298,11 @@ mod tests {
         // Query device services (this might be a custom DBGIF extension)
         let (_local_id, _remote_id) = establish_stream(&mut client_stream, b"host:services").await;
 
-        // Should receive list of available device services
-        let services_response = receive_adb_message(&mut client_stream).await.unwrap();
+        // Should receive list of available device services with timeout
+        let services_response = timeout(
+            Duration::from_secs(5),
+            receive_adb_message(&mut client_stream)
+        ).await.unwrap().unwrap();
         assert_eq!(services_response.command, AdbCommand::WRTE as u32);
 
         let services_str = String::from_utf8_lossy(&services_response.data);
@@ -304,9 +337,15 @@ mod tests {
 
         send_adb_message(&mut client_stream, &write_msg).await.unwrap();
 
-        // Receive OKAY and response
-        let _okay_response = receive_adb_message(&mut client_stream).await.unwrap();
-        let device_response = receive_adb_message(&mut client_stream).await.unwrap();
+        // Receive OKAY and response with timeout
+        let _okay_response = timeout(
+            Duration::from_secs(5),
+            receive_adb_message(&mut client_stream)
+        ).await.unwrap().unwrap();
+        let device_response = timeout(
+            Duration::from_secs(5),
+            receive_adb_message(&mut client_stream)
+        ).await.unwrap().unwrap();
 
         assert_eq!(device_response.command, AdbCommand::WRTE as u32);
         assert!(device_response.data.len() > 0);
@@ -325,9 +364,15 @@ mod tests {
 
         send_adb_message(&mut client_stream, &write_msg2).await.unwrap();
 
-        // Should receive responses for both commands
-        let _okay_response2 = receive_adb_message(&mut client_stream).await.unwrap();
-        let device_response2 = receive_adb_message(&mut client_stream).await.unwrap();
+        // Should receive responses for both commands with timeout
+        let _okay_response2 = timeout(
+            Duration::from_secs(5),
+            receive_adb_message(&mut client_stream)
+        ).await.unwrap().unwrap();
+        let device_response2 = timeout(
+            Duration::from_secs(5),
+            receive_adb_message(&mut client_stream)
+        ).await.unwrap().unwrap();
 
         assert_eq!(device_response2.command, AdbCommand::WRTE as u32);
         assert!(device_response2.data.len() > 0);

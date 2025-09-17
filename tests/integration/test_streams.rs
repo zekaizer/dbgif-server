@@ -31,8 +31,11 @@ mod tests {
 
         send_adb_message(&mut client_stream, &open_msg).await.unwrap();
 
-        // Receive OKAY response
-        let okay_response = receive_adb_message(&mut client_stream).await.unwrap();
+        // Receive OKAY response with timeout
+        let okay_response = timeout(
+            Duration::from_secs(5),
+            receive_adb_message(&mut client_stream)
+        ).await.unwrap().unwrap();
         assert_eq!(okay_response.command, AdbCommand::OKAY as u32);
         assert_eq!(okay_response.arg0, 1); // our local stream id
         assert!(okay_response.arg1 > 0);    // server assigned remote stream id
@@ -63,14 +66,20 @@ mod tests {
 
         send_adb_message(&mut client_stream, &write_msg).await.unwrap();
 
-        // Should receive OKAY acknowledgment
-        let okay_response = receive_adb_message(&mut client_stream).await.unwrap();
+        // Should receive OKAY acknowledgment with timeout
+        let okay_response = timeout(
+            Duration::from_secs(5),
+            receive_adb_message(&mut client_stream)
+        ).await.unwrap().unwrap();
         assert_eq!(okay_response.command, AdbCommand::OKAY as u32);
         assert_eq!(okay_response.arg0, remote_id);
         assert_eq!(okay_response.arg1, local_id);
 
-        // For echo service, should also receive echoed data
-        let echo_response = receive_adb_message(&mut client_stream).await.unwrap();
+        // For echo service, should also receive echoed data with timeout
+        let echo_response = timeout(
+            Duration::from_secs(5),
+            receive_adb_message(&mut client_stream)
+        ).await.unwrap().unwrap();
         assert_eq!(echo_response.command, AdbCommand::WRTE as u32);
         assert_eq!(echo_response.data, test_data);
     }
@@ -96,7 +105,10 @@ mod tests {
         };
 
         send_adb_message(&mut client_stream, &write_msg).await.unwrap();
-        let _okay_response = receive_adb_message(&mut client_stream).await.unwrap();
+        let _okay_response = timeout(
+            Duration::from_secs(5),
+            receive_adb_message(&mut client_stream)
+        ).await.unwrap().unwrap();
 
         // Close the stream
         let close_msg = AdbMessage {
@@ -111,8 +123,11 @@ mod tests {
 
         send_adb_message(&mut client_stream, &close_msg).await.unwrap();
 
-        // Should receive CLSE acknowledgment
-        let close_response = receive_adb_message(&mut client_stream).await.unwrap();
+        // Should receive CLSE acknowledgment with timeout
+        let close_response = timeout(
+            Duration::from_secs(5),
+            receive_adb_message(&mut client_stream)
+        ).await.unwrap().unwrap();
         assert_eq!(close_response.command, AdbCommand::CLSE as u32);
         assert_eq!(close_response.arg0, remote_id);
         assert_eq!(close_response.arg1, local_id);
@@ -148,9 +163,12 @@ mod tests {
             send_adb_message(&mut client_stream, &write_msg).await.unwrap();
         }
 
-        // Receive responses (order may vary)
+        // Receive responses (order may vary) with timeout
         for _ in 0..streams.len() {
-            let response = receive_adb_message(&mut client_stream).await.unwrap();
+            let response = timeout(
+                Duration::from_secs(5),
+                receive_adb_message(&mut client_stream)
+            ).await.unwrap().unwrap();
             assert_eq!(response.command, AdbCommand::OKAY as u32);
 
             // Verify stream ID is one of our active streams
@@ -179,8 +197,11 @@ mod tests {
 
         send_adb_message(&mut client_stream, &open_msg).await.unwrap();
 
-        // Should receive CLSE (close) instead of OKAY
-        let response = receive_adb_message(&mut client_stream).await.unwrap();
+        // Should receive CLSE (close) instead of OKAY with timeout
+        let response = timeout(
+            Duration::from_secs(5),
+            receive_adb_message(&mut client_stream)
+        ).await.unwrap().unwrap();
         assert_eq!(response.command, AdbCommand::CLSE as u32);
         assert_eq!(response.arg0, 1); // our local stream id
         assert_eq!(response.arg1, 0); // no remote stream was assigned
@@ -210,7 +231,10 @@ mod tests {
 
         send_adb_message(&mut client_stream, &write_msg).await.unwrap();
 
-        let okay_response = receive_adb_message(&mut client_stream).await.unwrap();
+        let okay_response = timeout(
+            Duration::from_secs(5),
+            receive_adb_message(&mut client_stream)
+        ).await.unwrap().unwrap();
         assert_eq!(okay_response.command, AdbCommand::OKAY as u32);
 
         // Verify server calculated same CRC
@@ -241,7 +265,10 @@ mod tests {
 
         send_adb_message(&mut client_stream, &write_msg).await.unwrap();
 
-        let okay_response = receive_adb_message(&mut client_stream).await.unwrap();
+        let okay_response = timeout(
+            Duration::from_secs(10),
+            receive_adb_message(&mut client_stream)
+        ).await.unwrap().unwrap();
         assert_eq!(okay_response.command, AdbCommand::OKAY as u32);
         assert_eq!(okay_response.arg0, remote_id);
         assert_eq!(okay_response.arg1, local_id);
@@ -269,7 +296,10 @@ mod tests {
         };
 
         send_adb_message(&mut client_stream, &close_msg).await.unwrap();
-        let _close_response = receive_adb_message(&mut client_stream).await.unwrap();
+        let _close_response = timeout(
+            Duration::from_secs(5),
+            receive_adb_message(&mut client_stream)
+        ).await.unwrap().unwrap();
 
         // Open new stream with same local ID
         let (local_id2, _remote_id2) = establish_stream(&mut client_stream, b"temp-svc-2").await;
@@ -297,8 +327,11 @@ mod tests {
 
         send_adb_message(&mut client_stream, &invalid_write).await.unwrap();
 
-        // Server should reject with CLSE or ignore
-        let response = receive_adb_message(&mut client_stream).await.unwrap();
+        // Server should reject with CLSE or ignore with timeout
+        let response = timeout(
+            Duration::from_secs(5),
+            receive_adb_message(&mut client_stream)
+        ).await.unwrap().unwrap();
         // Could be CLSE for invalid stream or server might ignore
         assert!(response.command == AdbCommand::CLSE as u32 ||
                 response.command != AdbCommand::OKAY as u32);

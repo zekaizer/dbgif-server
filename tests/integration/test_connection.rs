@@ -27,8 +27,11 @@ mod tests {
         // Send CNXN message
         send_adb_message(&mut client_stream, &cnxn_request).await.unwrap();
 
-        // Receive CNXN response
-        let cnxn_response = receive_adb_message(&mut client_stream).await.unwrap();
+        // Receive CNXN response with timeout
+        let cnxn_response = timeout(
+            Duration::from_secs(5),
+            receive_adb_message(&mut client_stream)
+        ).await.unwrap().unwrap();
 
         // Verify CNXN response
         assert_eq!(cnxn_response.command, AdbCommand::CNXN as u32);
@@ -53,7 +56,10 @@ mod tests {
         );
 
         send_adb_message(&mut client_stream, &cnxn_v1).await.unwrap();
-        let response_v1 = receive_adb_message(&mut client_stream).await.unwrap();
+        let response_v1 = timeout(
+            Duration::from_secs(5),
+            receive_adb_message(&mut client_stream)
+        ).await.unwrap().unwrap();
 
         assert_eq!(response_v1.command, AdbCommand::CNXN as u32);
         assert_eq!(response_v1.arg0 & 0xFF000000, 0x01000000); // Major version 1
@@ -68,8 +74,11 @@ mod tests {
 
         send_adb_message(&mut client_stream2, &cnxn_v99).await.unwrap();
 
-        // Should receive error or fallback version
-        let response_v99 = receive_adb_message(&mut client_stream2).await;
+        // Should receive error or fallback version with timeout
+        let response_v99 = timeout(
+            Duration::from_secs(5),
+            receive_adb_message(&mut client_stream2)
+        ).await;
         assert!(response_v99.is_ok()); // Server should handle gracefully
     }
 
@@ -87,7 +96,10 @@ mod tests {
         );
 
         send_adb_message(&mut client_stream, &cnxn_large).await.unwrap();
-        let response = receive_adb_message(&mut client_stream).await.unwrap();
+        let response = timeout(
+            Duration::from_secs(5),
+            receive_adb_message(&mut client_stream)
+        ).await.unwrap().unwrap();
 
         // Server should respond with its supported maxdata (likely smaller)
         assert!(response.arg1 > 0);
@@ -108,7 +120,10 @@ mod tests {
         );
 
         send_adb_message(&mut client_stream, &cnxn_request).await.unwrap();
-        let response = receive_adb_message(&mut client_stream).await.unwrap();
+        let response = timeout(
+            Duration::from_secs(5),
+            receive_adb_message(&mut client_stream)
+        ).await.unwrap().unwrap();
 
         // Verify server sends its identity
         assert!(!response.data.is_empty());
@@ -164,7 +179,10 @@ mod tests {
             );
 
             send_adb_message(&mut client_stream, &cnxn_request).await.unwrap();
-            let response = receive_adb_message(&mut client_stream).await.unwrap();
+            let response = timeout(
+                Duration::from_secs(5),
+                receive_adb_message(&mut client_stream)
+            ).await.unwrap().unwrap();
 
             assert_eq!(response.command, AdbCommand::CNXN as u32);
             assert!(response.is_valid_magic());
@@ -191,7 +209,10 @@ mod tests {
                 );
 
                 send_adb_message(&mut client_stream, &cnxn_request).await.unwrap();
-                let response = receive_adb_message(&mut client_stream).await.unwrap();
+                let response = timeout(
+                    Duration::from_secs(10),
+                    receive_adb_message(&mut client_stream)
+                ).await.unwrap().unwrap();
 
                 assert_eq!(response.command, AdbCommand::CNXN as u32);
                 response.is_valid_magic()

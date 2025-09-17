@@ -42,7 +42,10 @@ mod tests {
                         );
 
                         send_adb_message(&mut client_stream, &cnxn_request).await.unwrap();
-                        let response = receive_adb_message(&mut client_stream).await.unwrap();
+                        let response = timeout(
+                            Duration::from_secs(5),
+                            receive_adb_message(&mut client_stream)
+                        ).await.unwrap().unwrap();
 
                         if response.command == AdbCommand::CNXN as u32 && response.is_valid_magic() {
                             // Connection successful, try a simple host service
@@ -57,8 +60,14 @@ mod tests {
                             };
 
                             send_adb_message(&mut client_stream, &open_msg).await.unwrap();
-                            let okay_response = receive_adb_message(&mut client_stream).await.unwrap();
-                            let _version_response = receive_adb_message(&mut client_stream).await.unwrap();
+                            let okay_response = timeout(
+                                Duration::from_secs(5),
+                                receive_adb_message(&mut client_stream)
+                            ).await.unwrap().unwrap();
+                            let _version_response = timeout(
+                                Duration::from_secs(5),
+                                receive_adb_message(&mut client_stream)
+                            ).await.unwrap().unwrap();
 
                             if okay_response.command == AdbCommand::OKAY as u32 {
                                 return Ok::<i32, Box<dyn std::error::Error + Send + Sync>>(client_id);
@@ -112,7 +121,10 @@ mod tests {
                 // Keep background connections active with periodic host service calls
                 for _j in 0..10 {
                     let (_local_id, _remote_id) = establish_stream(&mut client_stream, b"host:version").await;
-                    let _version_response = receive_adb_message(&mut client_stream).await.unwrap();
+                    let _version_response = timeout(
+                        Duration::from_secs(5),
+                        receive_adb_message(&mut client_stream)
+                    ).await.unwrap().unwrap();
 
                     // Small delay between requests
                     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -138,7 +150,10 @@ mod tests {
             );
 
             send_adb_message(&mut client_stream, &cnxn_request).await.unwrap();
-            let response = receive_adb_message(&mut client_stream).await.unwrap();
+            let response = timeout(
+                Duration::from_secs(5),
+                receive_adb_message(&mut client_stream)
+            ).await.unwrap().unwrap();
 
             let connection_latency = start_time.elapsed();
             latency_measurements.push(connection_latency);
@@ -181,7 +196,10 @@ mod tests {
 
                 // Select device
                 let (_device_local_id, _device_remote_id) = establish_stream(&mut client_stream, b"host:device:throughput-test").await;
-                let _selection_response = receive_adb_message(&mut client_stream).await.unwrap();
+                let _selection_response = timeout(
+                    Duration::from_secs(5),
+                    receive_adb_message(&mut client_stream)
+                ).await.unwrap().unwrap();
 
                 // Open throughput test stream
                 let (local_id, remote_id) = establish_stream(&mut client_stream, b"shell:throughput").await;
@@ -203,8 +221,11 @@ mod tests {
                     };
 
                     if send_adb_message(&mut client_stream, &_write_msg).await.is_ok() {
-                        // Wait for OKAY response
-                        if receive_adb_message(&mut client_stream).await.is_ok() {
+                        // Wait for OKAY response with timeout
+                        if timeout(
+                            Duration::from_secs(5),
+                            receive_adb_message(&mut client_stream)
+                        ).await.is_ok() {
                             client_messages += 1;
                             total_messages.fetch_add(1, Ordering::Relaxed);
                         }
@@ -250,7 +271,10 @@ mod tests {
 
         // Select device
         let (_device_local_id, _device_remote_id) = establish_stream(&mut client_stream, b"host:device:multiplex-test").await;
-        let _selection_response = receive_adb_message(&mut client_stream).await.unwrap();
+        let _selection_response = timeout(
+            Duration::from_secs(5),
+            receive_adb_message(&mut client_stream)
+        ).await.unwrap().unwrap();
 
         let mut stream_handles = Vec::new();
         let success_counter = Arc::new(AtomicUsize::new(0));
@@ -319,7 +343,10 @@ mod tests {
 
                     // Do some work
                     let (_local_id, _remote_id) = establish_stream(&mut client_stream, b"host:version").await;
-                    let _version_response = receive_adb_message(&mut client_stream).await.unwrap();
+                    let _version_response = timeout(
+                        Duration::from_secs(5),
+                        receive_adb_message(&mut client_stream)
+                    ).await.unwrap().unwrap();
 
                     // Connection automatically dropped at end of scope
                     client_id
@@ -364,7 +391,10 @@ mod tests {
                 let device_id = format!("device-{}", (client_id % 3) + 1);
                 let device_service = format!("host:device:{}", device_id);
                 let (_device_local_id, _device_remote_id) = establish_stream(&mut client_stream, device_service.as_bytes()).await;
-                let _selection_response = receive_adb_message(&mut client_stream).await.unwrap();
+                let _selection_response = timeout(
+                    Duration::from_secs(5),
+                    receive_adb_message(&mut client_stream)
+                ).await.unwrap().unwrap();
 
                 // Perform some device operations
                 let (local_id, remote_id) = establish_stream(&mut client_stream, b"shell:test").await;
@@ -381,8 +411,14 @@ mod tests {
                 };
 
                 send_adb_message(&mut client_stream, &write_msg).await.unwrap();
-                let _okay_response = receive_adb_message(&mut client_stream).await.unwrap();
-                let _device_response = receive_adb_message(&mut client_stream).await.unwrap();
+                let _okay_response = timeout(
+                    Duration::from_secs(5),
+                    receive_adb_message(&mut client_stream)
+                ).await.unwrap().unwrap();
+                let _device_response = timeout(
+                    Duration::from_secs(5),
+                    receive_adb_message(&mut client_stream)
+                ).await.unwrap().unwrap();
 
                 client_id
             });
@@ -429,7 +465,10 @@ mod tests {
 
             for _i in 0..50 {
                 let (_local_id, _remote_id) = establish_stream(&mut client_stream, b"host:version").await;
-                let _version_response = receive_adb_message(&mut client_stream).await.unwrap();
+                let _version_response = timeout(
+                    Duration::from_secs(5),
+                    receive_adb_message(&mut client_stream)
+                ).await.unwrap().unwrap();
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         });
@@ -469,7 +508,10 @@ mod tests {
         // Server should still be responsive after stress tests
         let mut final_client_stream = establish_cnxn_handshake(server_addr).await;
         let (_local_id, _remote_id) = establish_stream(&mut final_client_stream, b"host:version").await;
-        let version_response = receive_adb_message(&mut final_client_stream).await.unwrap();
+        let version_response = timeout(
+            Duration::from_secs(5),
+            receive_adb_message(&mut final_client_stream)
+        ).await.unwrap().unwrap();
 
         assert_eq!(version_response.command, AdbCommand::WRTE as u32);
         assert!(version_response.data.len() > 0);

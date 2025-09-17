@@ -34,7 +34,10 @@ mod tests {
                 );
 
                 send_adb_message(&mut client_stream, &cnxn_request).await.unwrap();
-                let response = receive_adb_message(&mut client_stream).await.unwrap();
+                let response = timeout(
+                    Duration::from_secs(5),
+                    receive_adb_message(&mut client_stream)
+                ).await.unwrap().unwrap();
 
                 assert_eq!(response.command, AdbCommand::CNXN as u32);
                 assert!(response.is_valid_magic());
@@ -85,12 +88,18 @@ mod tests {
 
                 send_adb_message(&mut client_stream, &open_msg).await.unwrap();
 
-                // Should receive OKAY
-                let okay_response = receive_adb_message(&mut client_stream).await.unwrap();
+                // Should receive OKAY with timeout
+                let okay_response = timeout(
+                    Duration::from_secs(5),
+                    receive_adb_message(&mut client_stream)
+                ).await.unwrap().unwrap();
                 assert_eq!(okay_response.command, AdbCommand::OKAY as u32);
 
-                // Should receive service data
-                let data_response = receive_adb_message(&mut client_stream).await.unwrap();
+                // Should receive service data with timeout
+                let data_response = timeout(
+                    Duration::from_secs(5),
+                    receive_adb_message(&mut client_stream)
+                ).await.unwrap().unwrap();
                 assert_eq!(data_response.command, AdbCommand::WRTE as u32);
                 assert!(data_response.data.len() > 0);
 
@@ -132,8 +141,11 @@ mod tests {
                 let device_service = format!("host:device:{}", device_id);
                 let (_local_id, _remote_id) = establish_stream(&mut client_stream, device_service.as_bytes()).await;
 
-                // Should receive device selection response
-                let selection_response = receive_adb_message(&mut client_stream).await.unwrap();
+                // Should receive device selection response with timeout
+                let selection_response = timeout(
+                    Duration::from_secs(5),
+                    receive_adb_message(&mut client_stream)
+                ).await.unwrap().unwrap();
                 assert_eq!(selection_response.command, AdbCommand::WRTE as u32);
 
                 let response_str = String::from_utf8_lossy(&selection_response.data);
@@ -188,11 +200,17 @@ mod tests {
 
                 send_adb_message(&mut client_stream, &write_msg).await.unwrap();
 
-                // Receive OKAY
-                let _okay_response = receive_adb_message(&mut client_stream).await.unwrap();
+                // Receive OKAY with timeout
+                let _okay_response = timeout(
+                    Duration::from_secs(5),
+                    receive_adb_message(&mut client_stream)
+                ).await.unwrap().unwrap();
 
-                // Should receive echoed data for this specific client
-                let echo_response = receive_adb_message(&mut client_stream).await.unwrap();
+                // Should receive echoed data for this specific client with timeout
+                let echo_response = timeout(
+                    Duration::from_secs(5),
+                    receive_adb_message(&mut client_stream)
+                ).await.unwrap().unwrap();
                 assert_eq!(echo_response.command, AdbCommand::WRTE as u32);
 
                 let echoed_data = String::from_utf8_lossy(&echo_response.data);
@@ -248,9 +266,15 @@ mod tests {
 
                 send_adb_message(&mut client_stream, &write_msg).await.unwrap();
 
-                // Receive responses
-                let _okay_response = receive_adb_message(&mut client_stream).await.unwrap();
-                let device_response = receive_adb_message(&mut client_stream).await.unwrap();
+                // Receive responses with timeout
+                let _okay_response = timeout(
+                    Duration::from_secs(5),
+                    receive_adb_message(&mut client_stream)
+                ).await.unwrap().unwrap();
+                let device_response = timeout(
+                    Duration::from_secs(5),
+                    receive_adb_message(&mut client_stream)
+                ).await.unwrap().unwrap();
 
                 assert_eq!(device_response.command, AdbCommand::WRTE as u32);
                 assert!(device_response.data.len() > 0);
@@ -297,7 +321,10 @@ mod tests {
             let service_name = if i == 0 { "host:version" } else { "host:list" };
 
             let (_local_id, _remote_id) = establish_stream(&mut client_stream, service_name.as_bytes()).await;
-            let service_response = receive_adb_message(&mut client_stream).await.unwrap();
+            let service_response = timeout(
+                Duration::from_secs(5),
+                receive_adb_message(&mut client_stream)
+            ).await.unwrap().unwrap();
 
             assert_eq!(service_response.command, AdbCommand::WRTE as u32);
             assert!(service_response.data.len() > 0);
@@ -331,12 +358,18 @@ mod tests {
 
                 send_adb_message(&mut client_stream, &open_msg).await.unwrap();
 
-                let okay_response = receive_adb_message(&mut client_stream).await.unwrap();
+                let okay_response = timeout(
+                    Duration::from_secs(5),
+                    receive_adb_message(&mut client_stream)
+                ).await.unwrap().unwrap();
                 assert_eq!(okay_response.command, AdbCommand::OKAY as u32);
                 assert_eq!(okay_response.arg0, 1); // Our local stream ID
                 assert!(okay_response.arg1 > 0);    // Server assigned remote stream ID
 
-                let version_response = receive_adb_message(&mut client_stream).await.unwrap();
+                let version_response = timeout(
+                    Duration::from_secs(5),
+                    receive_adb_message(&mut client_stream)
+                ).await.unwrap().unwrap();
                 assert_eq!(version_response.command, AdbCommand::WRTE as u32);
                 assert_eq!(version_response.arg1, 1); // Our local stream ID
 
@@ -396,9 +429,15 @@ mod tests {
 
                 send_adb_message(&mut client_stream, &write_msg).await.unwrap();
 
-                // Receive OKAY and device response
-                let _okay_response = receive_adb_message(&mut client_stream).await.unwrap();
-                let device_response = receive_adb_message(&mut client_stream).await.unwrap();
+                // Receive OKAY and device response with timeout
+                let _okay_response = timeout(
+                    Duration::from_secs(5),
+                    receive_adb_message(&mut client_stream)
+                ).await.unwrap().unwrap();
+                let device_response = timeout(
+                    Duration::from_secs(5),
+                    receive_adb_message(&mut client_stream)
+                ).await.unwrap().unwrap();
 
                 assert_eq!(device_response.command, AdbCommand::WRTE as u32);
                 let response_data = String::from_utf8_lossy(&device_response.data);
@@ -445,7 +484,10 @@ mod tests {
                     );
 
                     if send_adb_message(&mut client_stream, &cnxn_request).await.is_ok() {
-                        if let Ok(response) = receive_adb_message(&mut client_stream).await {
+                        if let Ok(Ok(response)) = timeout(
+                            Duration::from_secs(5),
+                            receive_adb_message(&mut client_stream)
+                        ).await {
                             if response.command == AdbCommand::CNXN as u32 {
                                 return true; // Successful connection
                             }
