@@ -284,6 +284,25 @@ async fn run_host_services_test(
         match service_name {
             "host:version" => test_host_version(addr, timeout).await?,
             "host:list" => test_host_list(addr, timeout).await?,
+            service if service.starts_with("host:connect:") => {
+                // Parse IP:port from service name
+                if let Some(address) = service.strip_prefix("host:connect:") {
+                    // Simple parsing for testing - in a real client this would be more robust
+                    if let Some(colon_pos) = address.rfind(':') {
+                        let ip = &address[..colon_pos];
+                        let port_str = &address[colon_pos + 1..];
+                        if let Ok(port) = port_str.parse::<u16>() {
+                            test_host_connect(addr, ip, port, timeout).await?;
+                        } else {
+                            return Err(anyhow::anyhow!("Invalid port in {}", service));
+                        }
+                    } else {
+                        return Err(anyhow::anyhow!("Invalid host:connect format: {}", service));
+                    }
+                } else {
+                    return Err(anyhow::anyhow!("Invalid host:connect command"));
+                }
+            }
             _ => {
                 // Generic test for other services
                 let mut connection = create_connection(addr, timeout).await?;
@@ -347,6 +366,29 @@ async fn test_host_list(
     }
 }
 
+/// Test host:connect with IP:port
+async fn test_host_connect(
+    addr: &SocketAddr,
+    target_ip: &str,
+    target_port: u16,
+    timeout: u64,
+) -> anyhow::Result<()> {
+    let mut connection = create_connection(addr, timeout).await?;
+
+    // Send host:connect command
+    let connect_cmd = format!("host:connect:{}:{}", target_ip, target_port);
+    send_ascii_command(&mut connection, &connect_cmd).await?;
+
+    // Receive response
+    let (success, response) = receive_ascii_response(&mut connection).await?;
+
+    if success {
+        info!("✅ host:connect test passed - Connected to {}:{}", target_ip, target_port);
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!("host:connect failed: {}", response))
+    }
+}
 
 /// Test shell service using STRM messages
 async fn test_shell_service(
@@ -663,10 +705,11 @@ async fn run_interactive_mode(
                             }
                             "help" => {
                                 info!("Available commands (ASCII Protocol):");
-                                info!("  host:version       - Get server version");
-                                info!("  host:list          - List devices");
-                                info!("  host:transport:<id> - Connect to device");
-                                info!("  shell:             - Open shell service");
+                                info!("  host:version           - Get server version");
+                                info!("  host:list              - List devices");
+                                info!("  host:transport:<id>    - Connect to device");
+                                info!("  host:connect:<ipv4>:<port> - Connect to IPv4:port");
+                                info!("  shell:                 - Open shell service");
                                 info!("  strm <id> <data>   - Send STRM data");
                                 info!("  <command>          - Send raw ASCII command");
                                 info!("  help               - Show this help");

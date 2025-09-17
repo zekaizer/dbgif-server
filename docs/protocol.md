@@ -116,6 +116,27 @@ S: "OKAY0000"                           # Device selected, no data
 C: "0005shell:"                         # This will create a stream
 ```
 
+#### host:connect:<ip>:<port>
+Connects directly to a device at the specified IPv4 address and port. This creates a dynamic connection without requiring pre-registration.
+
+**Security Restriction:** For security reasons, only localhost (127.0.0.1) connections are allowed.
+
+**Request:** `"0019host:connect:127.0.0.1:5557"`
+**Response:** `"OKAY"` + Length (success) or `"FAIL"` + Length + error
+
+**Example:**
+```
+C: "0019host:connect:127.0.0.1:5557"
+S: "OKAY0000"                           # Device registered, no data
+C: "0005shell:"                         # This will create a stream
+```
+
+**Error Cases:**
+- Invalid IP address: `"FAIL0011invalid address"`
+- Non-localhost IP: `"FAIL001donly localhost connections allowed"`
+- Registration failed: `"FAIL0013registration failed"`
+- Port out of range: `"FAIL000dinvalid port"`
+
 #### host:features
 Lists server capabilities and supported features.
 
@@ -125,7 +146,7 @@ Lists server capabilities and supported features.
 **Example:**
 ```
 C: "000dhost:features"
-S: "OKAY0028lazy-connection\nmulti-client\nping-pong\n"  # 0x28 (40 decimal) byte feature list
+S: "OKAY0034lazy-connection\nmulti-client\nping-pong\ndirect-connect\n"  # 0x34 (52 decimal) byte feature list
 ```
 
 ### Local Services
@@ -661,6 +682,7 @@ Stream Mapping:
 | `host:version` | Get server version | `"OKAY"` + version |
 | `host:list` | List all devices | `"OKAY"` + device list |
 | `host:transport:<id>` | Select device | `"OKAY0000"` |
+| `host:connect:<ip>:<port>` | Connect to IP:port | `"OKAY0000"` |
 | `host:features` | Get server features | `"OKAY"` + features |
 | `shell:` | Open shell stream | `"OKAY0002"` + stream ID |
 | `tcp:<port>` | TCP port forward | `"OKAY0002"` + stream ID |

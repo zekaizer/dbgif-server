@@ -134,4 +134,169 @@ mod tests {
         assert_eq!(decoded_id, stream_id);
         assert_eq!(decoded_data, data);
     }
+
+    #[tokio::test]
+    async fn test_ascii_host_connect_valid_ip() {
+        // Start server on a random port for testing
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Spawn server task
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+
+            use dbgif_protocol::server::state::{ServerConfig, ServerState};
+            use dbgif_protocol::server::stream_forwarder::StreamForwarder;
+            use dbgif_protocol::server::ascii_handler::AsciiHandler;
+            use std::sync::Arc;
+
+            let config = ServerConfig::default();
+            let server_state = Arc::new(ServerState::new(config));
+            let stream_forwarder = Arc::new(StreamForwarder::new(Arc::clone(&server_state)));
+
+            let handler = AsciiHandler::new(
+                server_state,
+                stream_forwarder,
+                "test-session".to_string(),
+            );
+
+            let _ = handler.handle_connection(stream).await;
+        });
+
+        // Give server time to start
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        // Connect as client
+        let mut client = TcpStream::connect(addr).await.unwrap();
+
+        // Send host:connect request to localhost (allowed)
+        let request = "host:connect:127.0.0.1:9999";
+        let length = format!("{:04x}", request.len());
+        let message = format!("{}{}", length, request);
+
+        client.write_all(message.as_bytes()).await.unwrap();
+        client.flush().await.unwrap();
+
+        // Read response
+        let mut response = vec![0u8; 1024];
+        let n = client.read(&mut response).await.unwrap();
+        response.truncate(n);
+
+        let response_str = String::from_utf8(response).unwrap();
+
+        // Should get OKAY response since we only register the device without testing connection
+        assert!(response_str.starts_with("OKAY"));
+        assert_eq!(&response_str[0..8], "OKAY0000"); // OKAY with no data
+    }
+
+    #[tokio::test]
+    async fn test_ascii_host_connect_invalid_format() {
+        // Start server on a random port for testing
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Spawn server task
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+
+            use dbgif_protocol::server::state::{ServerConfig, ServerState};
+            use dbgif_protocol::server::stream_forwarder::StreamForwarder;
+            use dbgif_protocol::server::ascii_handler::AsciiHandler;
+            use std::sync::Arc;
+
+            let config = ServerConfig::default();
+            let server_state = Arc::new(ServerState::new(config));
+            let stream_forwarder = Arc::new(StreamForwarder::new(Arc::clone(&server_state)));
+
+            let handler = AsciiHandler::new(
+                server_state,
+                stream_forwarder,
+                "test-session".to_string(),
+            );
+
+            let _ = handler.handle_connection(stream).await;
+        });
+
+        // Give server time to start
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        // Connect as client
+        let mut client = TcpStream::connect(addr).await.unwrap();
+
+        // Send invalid host:connect request (missing port)
+        let request = "host:connect:127.0.0.1";
+        let length = format!("{:04x}", request.len());
+        let message = format!("{}{}", length, request);
+
+        client.write_all(message.as_bytes()).await.unwrap();
+        client.flush().await.unwrap();
+
+        // Read response
+        let mut response = vec![0u8; 1024];
+        let n = client.read(&mut response).await.unwrap();
+        response.truncate(n);
+
+        let response_str = String::from_utf8(response).unwrap();
+
+        // Should get FAIL response for invalid format
+        assert!(response_str.starts_with("FAIL"));
+        assert!(response_str.len() >= 8); // FAIL + 4 hex digits minimum
+        let error_msg = &response_str[8..];
+        assert!(error_msg.contains("invalid") || error_msg.contains("address") || error_msg.contains("port") || error_msg.contains("missing"));
+    }
+
+    #[tokio::test]
+    async fn test_ascii_host_connect_non_localhost_rejected() {
+        // Start server on a random port for testing
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Spawn server task
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+
+            use dbgif_protocol::server::state::{ServerConfig, ServerState};
+            use dbgif_protocol::server::stream_forwarder::StreamForwarder;
+            use dbgif_protocol::server::ascii_handler::AsciiHandler;
+            use std::sync::Arc;
+
+            let config = ServerConfig::default();
+            let server_state = Arc::new(ServerState::new(config));
+            let stream_forwarder = Arc::new(StreamForwarder::new(Arc::clone(&server_state)));
+
+            let handler = AsciiHandler::new(
+                server_state,
+                stream_forwarder,
+                "test-session".to_string(),
+            );
+
+            let _ = handler.handle_connection(stream).await;
+        });
+
+        // Give server time to start
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        // Connect as client
+        let mut client = TcpStream::connect(addr).await.unwrap();
+
+        // Send host:connect request to non-localhost IP (should be rejected)
+        let request = "host:connect:192.168.1.100:5557";
+        let length = format!("{:04x}", request.len());
+        let message = format!("{}{}", length, request);
+
+        client.write_all(message.as_bytes()).await.unwrap();
+        client.flush().await.unwrap();
+
+        // Read response
+        let mut response = vec![0u8; 1024];
+        let n = client.read(&mut response).await.unwrap();
+        response.truncate(n);
+
+        let response_str = String::from_utf8(response).unwrap();
+
+        // Should get FAIL response for non-localhost IP
+        assert!(response_str.starts_with("FAIL"));
+        let error_msg = &response_str[8..];
+        assert!(error_msg.contains("localhost"));
+    }
 }

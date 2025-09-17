@@ -91,6 +91,9 @@ impl AsciiHandler {
             stream.flush().await?;
         }
 
+        // Clean up temporary devices for this session
+        self.cleanup_temporary_devices().await;
+
         info!("ASCII connection from {} closed", peer_addr);
         Ok(())
     }
@@ -108,6 +111,11 @@ impl AsciiHandler {
             if request.starts_with("host:transport:") {
                 let device_id = request.strip_prefix("host:transport:").unwrap_or("");
                 return self.handle_transport_selection(device_id).await;
+            }
+            // Handle async direct connection
+            if request.starts_with("host:connect:") {
+                let address = request.strip_prefix("host:connect:").unwrap_or("");
+                return self.handle_direct_connection(address).await;
             }
             // Other host services are synchronous
             return self.handle_host_service(request);
@@ -228,6 +236,162 @@ impl AsciiHandler {
         }
     }
 
+    /// Handle direct connection to IP:port
+    async fn handle_direct_connection(&self, address: &str) -> Vec<u8> {
+        info!("Attempting direct connection to: {}", address);
+
+        // Parse IP:port from address
+        let (ip, port) = match self.parse_ip_port(address) {
+            Ok((ip, port)) => (ip, port),
+            Err(error) => {
+                warn!("Invalid address format '{}': {}", address, error);
+                return self.create_fail_response("invalid address");
+            }
+        };
+
+        // Validate port range
+        if port == 0 {
+            warn!("Invalid port: {}", port);
+            return self.create_fail_response("invalid port");
+        }
+
+        // Create a unique device ID for this direct connection
+        let device_id = format!("direct:{}:{}", ip, port);
+
+        // Check if device already exists
+        let device_registry = &self.server_state.device_registry;
+        if device_registry.get_device(&device_id).is_ok() {
+            // Device already exists, just select it
+            let mut selected = self.selected_device.write().await;
+            *selected = Some(device_id.clone());
+            info!("Device '{}' already exists, selected for session {}", device_id, self.session_id);
+            return self.create_okay_response(&[]);
+        }
+
+        // Register as temporary device
+        match self.register_direct_device(&ip, port, &device_id).await {
+            Ok(()) => {
+                // Store selected device
+                let mut selected = self.selected_device.write().await;
+                *selected = Some(device_id.clone());
+
+                info!("Successfully registered temporary device '{}' for session {} ({}:{})", device_id, self.session_id, ip, port);
+                self.create_okay_response(&[])
+            }
+            Err(error) => {
+                warn!("Failed to register device {}:{}: {}", ip, port, error);
+                self.create_fail_response("registration failed")
+            }
+        }
+    }
+
+    /// Parse IPv4:port from address string with localhost restriction
+    fn parse_ip_port(&self, address: &str) -> Result<(String, u16), String> {
+        // Parse IPv4 addresses: 127.0.0.1:5557
+        if let Some(colon_pos) = address.rfind(':') {
+            let ip = address[..colon_pos].to_string();
+            let port_str = &address[colon_pos + 1..];
+            let port = port_str.parse::<u16>()
+                .map_err(|_| "invalid port number")?;
+
+            // Basic IPv4 validation
+            if ip.split('.').count() == 4 {
+                for part in ip.split('.') {
+                    if part.parse::<u8>().is_err() {
+                        return Err("invalid IPv4 address".to_string());
+                    }
+                }
+
+                // Security: Only allow localhost connections
+                if ip != "127.0.0.1" {
+                    return Err("only localhost connections allowed".to_string());
+                }
+
+                return Ok((ip, port));
+            } else {
+                return Err("only IPv4 addresses supported".to_string());
+            }
+        }
+
+        Err("missing port number".to_string())
+    }
+
+    /// Register direct device without connection testing
+    async fn register_direct_device(&self, ip: &str, port: u16, device_id: &str) -> Result<(), String> {
+        use std::net::SocketAddr;
+        use crate::server::device_registry::{DeviceInfo, DeviceState, DeviceCapabilities, DeviceMetadata, DeviceStats};
+        use std::collections::HashMap;
+
+        // Parse socket address for validation
+        let socket_addr: SocketAddr = format!("{}:{}", ip, port)
+            .parse()
+            .map_err(|_| "invalid address format")?;
+
+        // Create temporary device info
+        let mut properties = HashMap::new();
+        properties.insert("temporary".to_string(), "true".to_string());
+        properties.insert("session_id".to_string(), self.session_id.clone());
+
+        let device_info = DeviceInfo {
+            device_id: device_id.to_string(),
+            name: format!("Direct TCP {}:{}", ip, port),
+            address: socket_addr,
+            state: DeviceState::Discovered, // Will be connected on-demand
+            capabilities: DeviceCapabilities::default(),
+            metadata: DeviceMetadata {
+                model: Some("Direct TCP Connection".to_string()),
+                manufacturer: Some("DBGIF".to_string()),
+                serial_number: Some(format!("tcp-{}-{}", ip, port)),
+                os_version: None,
+                properties,
+            },
+            last_seen: std::time::Instant::now(),
+            stats: DeviceStats::default(),
+        };
+
+        // Register in device registry
+        let device_registry = &self.server_state.device_registry;
+        device_registry.register_device(device_info)
+            .map_err(|e| format!("failed to register device: {}", e))?;
+
+        info!("Successfully registered temporary device '{}' at {}:{}", device_id, ip, port);
+
+        Ok(())
+    }
+
+    /// Cleanup temporary devices registered for this session
+    async fn cleanup_temporary_devices(&self) {
+        let device_registry = &self.server_state.device_registry;
+        let all_devices = match device_registry.list_devices() {
+            Ok(devices) => devices,
+            Err(e) => {
+                warn!("Failed to list devices for cleanup: {}", e);
+                return;
+            }
+        };
+
+        for device_info in all_devices {
+            // Check if this is a temporary device for our session
+            if let Some(temporary) = device_info.metadata.properties.get("temporary") {
+                if temporary == "true" {
+                    if let Some(session_id) = device_info.metadata.properties.get("session_id") {
+                        if session_id == &self.session_id {
+                            // Remove temporary device
+                            match device_registry.unregister_device(&device_info.device_id) {
+                                Ok(_) => {
+                                    info!("Cleaned up temporary device '{}' for session {}", device_info.device_id, self.session_id);
+                                }
+                                Err(e) => {
+                                    warn!("Failed to cleanup temporary device '{}': {}", device_info.device_id, e);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Handle shell service
     async fn handle_shell_service(&self, request: &str) -> Vec<u8> {
         let selected_device = self.selected_device.read().await.clone();
@@ -248,13 +412,13 @@ impl AsciiHandler {
         // Allocate stream ID with service name
         let stream_id = self.allocate_stream_id_with_service(service_name.clone()).await;
 
-        // Open stream with the stream forwarder
+        // Open stream with the stream forwarder (no upstream_connection needed - registry handles it)
         let result = self.stream_forwarder.open_stream(
             self.session_id.clone(),
             stream_id as u32,
             stream_id as u32,  // Use same ID for both local and remote
             format!("{}:{}", device_id, service_name),
-            None,  // No direct connection yet
+            None, // StreamForwarder will create connection from device registry
         ).await;
 
         match result {
@@ -289,13 +453,13 @@ impl AsciiHandler {
         // Allocate stream ID with TCP service name
         let stream_id = self.allocate_stream_id_with_service(format!("tcp:{}", port)).await;
 
-        // Open stream with the stream forwarder
+        // Open stream with the stream forwarder (registry handles connection)
         let result = self.stream_forwarder.open_stream(
             self.session_id.clone(),
             stream_id as u32,
             stream_id as u32,
             format!("{}:{}", device_id, request),
-            None,
+            None, // StreamForwarder will create connection from device registry
         ).await;
 
         match result {
@@ -324,13 +488,13 @@ impl AsciiHandler {
         // Allocate stream ID with sync service
         let stream_id = self.allocate_stream_id_with_service("sync:".to_string()).await;
 
-        // Open stream with the stream forwarder
+        // Open stream with the stream forwarder (registry handles connection)
         let result = self.stream_forwarder.open_stream(
             self.session_id.clone(),
             stream_id as u32,
             stream_id as u32,
             format!("{}:sync:", device_id),
-            None,
+            None, // StreamForwarder will create connection from device registry
         ).await;
 
         match result {
