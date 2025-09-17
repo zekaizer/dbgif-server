@@ -225,6 +225,7 @@ dependencies = [
  "crc32fast",
  "dbgif-protocol",
  "mockall",
+ "once_cell",
  "rand",
  "serde",
  "serde_yaml",

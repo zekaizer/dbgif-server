@@ -1,15 +1,19 @@
+pub mod ports;
+
 use anyhow::Result;
-use std::net::{TcpListener, SocketAddr};
+use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::time::{sleep, timeout};
 
-/// Find an available port on the system
-pub fn find_available_port() -> Result<u16> {
-    let listener = TcpListener::bind("127.0.0.1:0")?;
-    let port = listener.local_addr()?.port();
-    drop(listener);
-    Ok(port)
-}
+// Re-export commonly used functions from ports module
+pub use ports::{
+    find_available_port,
+    find_available_ports,
+    find_random_port,
+    is_port_in_use,
+    global_port_manager,
+    PortManager,
+};
 
 /// Wait for a TCP port to become available
 pub async fn wait_for_port(addr: SocketAddr, max_wait: Duration) -> Result<()> {

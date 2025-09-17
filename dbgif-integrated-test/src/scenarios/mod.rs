@@ -1,5 +1,9 @@
+pub mod basic;
+
 use anyhow::Result;
 use async_trait::async_trait;
+
+pub use basic::{BasicConnectionScenario, HostServicesScenario, MultiDeviceScenario};
 
 pub struct ScenarioManager {
     scenarios: Vec<Box<dyn Scenario>>,

@@ -1,4 +1,5 @@
 pub mod ascii;
+pub mod connection;
 
 use anyhow::Result;
 use std::net::SocketAddr;
