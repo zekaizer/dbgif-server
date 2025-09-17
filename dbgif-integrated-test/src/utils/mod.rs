@@ -1,3 +1,4 @@
+pub mod logging;
 pub mod ports;
 
 use anyhow::Result;

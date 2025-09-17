@@ -1,0 +1,48 @@
+version: "1.0"
+
+server:
+  address: "127.0.0.1:5555"
+  timeout: 30
+  retry_count: 3
+  retry_delay: 1000
+
+devices:
+  count: 3
+  base_port: 5557
+  startup_delay: 100
+  device_prefix: "example-device"
+  capabilities:
+    - shell
+    - file
+    - debug
+
+scenarios:
+  default: basic_flow
+  timeout: 60
+  enabled:
+    - basic_connection
+    - host_services
+    - multi_device
+  disabled:
+    - memory_leak
+  parameters:
+    throughput_data_size: 4096
+    throughput_duration_secs: 10
+    latency_iterations: 100
+    connection_limit_max: 50
+    memory_leak_iterations: 1000
+
+logging:
+  level: info
+  format: pretty
+  color: true
+  show_target: true
+  show_thread_ids: false
+  show_line_numbers: false
+
+test:
+  retry_count: 3
+  retry_delay: 1000
+  fail_fast: false
+  parallel: true
+  cleanup_on_failure: true
