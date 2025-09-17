@@ -1,0 +1,26 @@
+language = "C"
+include_guard = "DBGIF_PROTOCOL_GENERATED_H"
+includes = ["stdint.h", "stddef.h"]
+
+header = '''/**
+ * DBGIF Protocol Core - C API (Auto-generated via cbindgen)
+ *
+ * This header provides C bindings for the DBGIF protocol decoder
+ * with streaming support for embedded systems.
+ *
+ * Features:
+ * - No dynamic memory allocation
+ * - Incremental message parsing
+ * - Zero-copy data processing
+ * - CRC32 validation
+ *
+ * Usage:
+ * 1. Allocate a working buffer (minimum 256 bytes recommended)
+ * 2. Initialize decoder with dbgif_decoder_init()
+ * 3. Feed data with dbgif_decode_bytes()
+ * 4. Check for complete messages
+ * 5. Reset decoder for next message
+ */'''
+
+[export]
+exclude = ["MessageDecoder", "MessageEncoder", "ProtocolStateMachine"]

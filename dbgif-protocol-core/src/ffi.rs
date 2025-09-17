@@ -389,20 +389,50 @@ pub struct DbgifStateMachine {
 }
 
 // Initialize state machine
+#[cfg(feature = "std")]
 #[no_mangle]
 pub unsafe extern "C" fn dbgif_state_machine_new() -> *mut DbgifStateMachine {
+    extern crate alloc;
+    use alloc::boxed::Box;
+
     let machine = Box::new(DbgifStateMachine {
         machine: ProtocolStateMachine::new(),
     });
     Box::into_raw(machine)
 }
 
+// Initialize state machine with buffer (no_std)
+#[cfg(not(feature = "std"))]
+#[no_mangle]
+pub unsafe extern "C" fn dbgif_state_machine_init(
+    buffer: *mut u8,
+    buffer_size: usize,
+) -> *mut DbgifStateMachine {
+    if buffer.is_null() || buffer_size < mem::size_of::<DbgifStateMachine>() {
+        return ptr::null_mut();
+    }
+
+    let machine = buffer as *mut DbgifStateMachine;
+    (*machine).machine = ProtocolStateMachine::new();
+    machine
+}
+
 // Free state machine
+#[cfg(feature = "std")]
 #[no_mangle]
 pub unsafe extern "C" fn dbgif_state_machine_free(machine: *mut DbgifStateMachine) {
     if !machine.is_null() {
+        extern crate alloc;
+        use alloc::boxed::Box;
         let _ = Box::from_raw(machine);
     }
+}
+
+// Free state machine (no_std - no-op since user manages buffer)
+#[cfg(not(feature = "std"))]
+#[no_mangle]
+pub unsafe extern "C" fn dbgif_state_machine_free(_machine: *mut DbgifStateMachine) {
+    // No-op for no_std - user manages the buffer
 }
 
 // Validate if command can be sent

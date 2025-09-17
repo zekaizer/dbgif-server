@@ -5,9 +5,15 @@ edition = "2021"
 authors = ["Luke Lee"]
 license = "MIT"
 
+[lib]
+crate-type = ["lib", "staticlib"]
+
 [dependencies]
 # CRC32 with no_std support
 crc32fast = { version = "1.4", default-features = false }
+
+[build-dependencies]
+cbindgen = "0.27"
 
 [features]
 default = ["std", "ffi"]
@@ -17,3 +23,10 @@ ffi = []
 [dev-dependencies]
 # For testing only
 rand = "0.8"
+
+[profile.release]
+opt-level = "z"     # Optimize for size
+lto = true          # Enable Link Time Optimization
+codegen-units = 1   # Single codegen unit for better optimization
+strip = true        # Strip symbols
+panic = "abort"     # Smaller panic handler
