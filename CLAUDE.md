@@ -13,19 +13,23 @@
 ## Project Structure
 
 ```
-dbgif-server/
-├── src/
-│   ├── protocol/          # DBGIF protocol implementation
-│   ├── transport/         # Transport abstraction (TCP + future USB)
-│   ├── server/            # Main server logic
-│   └── bin/
-│       ├── dbgif-server.rs
-│       ├── dbgif-test-client.rs
-│       └── tcp-device-test-server.rs
-├── tests/
-│   ├── contract/          # Protocol contract tests
-│   ├── integration/       # End-to-end tests
-│   └── unit/             # Unit tests
+workspace-root/
+├── dbgif-protocol/        # Core protocol implementation
+│   ├── src/              # Protocol messages, commands, CRC
+│   └── tests/            # Protocol contract tests
+├── dbgif-transport/       # Transport layer abstraction
+│   ├── src/              # TCP connection, future USB
+│   └── tests/            # Transport tests
+├── dbgif-server/          # Server implementation
+│   ├── src/
+│   │   ├── server/       # Main server logic
+│   │   ├── host_services/# Host service handlers
+│   │   └── bin/
+│   │       └── dbgif-server.rs
+│   └── tests/            # Integration tests
+├── dbgif-integrated-test/ # Comprehensive test framework
+│   ├── src/              # Test client and device simulator
+│   └── bin/              # Test runner binary
 └── specs/001-dbgif-server/
     ├── spec.md           # Feature specification
     ├── plan.md           # Implementation plan
@@ -140,16 +144,14 @@ struct AdbMessage {
 # Build all components
 cargo build --release
 
-# Run contract tests
-cargo test --test protocol_contracts
+# Run all tests
+cargo test --workspace
 
-# Run integration tests
-cargo test --test integration_tests
+# Start server
+./target/release/dbgif-server --port 5555
 
-# Start test environment
-./target/release/tcp-device-test-server --port 5557 &
-./target/release/dbgif-server --port 5555 --device-port 5557 &
-./target/release/dbgif-test-client --server 127.0.0.1:5555 --test basic
+# Run integrated tests (includes device simulation)
+./target/release/dbgif-integrated-test --server 127.0.0.1:5555 --test all
 ```
 
 ## Recent Changes

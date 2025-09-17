@@ -8,8 +8,7 @@
 
 This guide walks you through setting up and testing the DBGIF server with ADB-like protocol support:
 1. **DBGIF Server** - ADB-like protocol server with host services (NOT fully ADB-compatible)
-2. **Test Client** - Custom client for server validation
-3. **TCP Device Test Server** - Simulates device daemon using DBGIF protocol
+2. **DBGIF Integrated Test** - Comprehensive test framework with built-in device simulation
 
 **Architecture**:
 ```
@@ -34,25 +33,12 @@ cargo build --release
 
 # Verify builds
 ls target/release/
-# Should see: dbgif-server, dbgif-test-client, tcp-device-test-server
+# Should see: dbgif-server, dbgif-integrated-test
 ```
 
-### 2. Start the TCP Device Test Server (Device Simulation)
+### 2. Start the DBGIF Server
 ```bash
-# Terminal 1: Start DBGIF device daemon simulation
-./target/release/tcp-device-test-server --port 5557 --device-id "tcp:custom001" --system-type "tizen" --model "MyBoard" --version "v1.2" --verbose
-
-# Expected output:
-# TCP Device Test Server v1.0.0 (DBGIF Protocol)
-# Device ID: tcp:custom001
-# System Type: tizen
-# Listening on 127.0.0.1:5557
-# Ready to accept DBGIF connections...
-```
-
-### 3. Start the DBGIF Server
-```bash
-# Terminal 2: Start DBGIF protocol server
+# Terminal 1: Start DBGIF protocol server
 ./target/release/dbgif-server --port 5555 --discovery-ports 5557 --max-connections 100 --verbose
 
 # Expected output:
@@ -66,13 +52,13 @@ ls target/release/
 # Server ready for connections
 ```
 
-### 4. Run Test Client (Basic Protocol Test)
+### 3. Run Integrated Tests (Includes Device Simulation)
 ```bash
-# Terminal 3: Run DBGIF protocol test
-./target/release/dbgif-test-client --server 127.0.0.1:5555 --test basic
+# Terminal 2: Run comprehensive tests with automatic device simulation
+./target/release/dbgif-integrated-test --server 127.0.0.1:5555 --test basic
 
 # Expected output:
-# DBGIF Test Client v1.0.0 (ADB-like Protocol)
+# DBGIF Integrated Test v1.0.0 (ADB-like Protocol)
 # Connecting to 127.0.0.1:5555...
 # ✓ TCP connection established
 # ✓ CNXN handshake successful
@@ -86,7 +72,7 @@ ls target/release/
 ### Connection and Handshake Test
 ```bash
 # Test ADB protocol connection establishment
-./target/release/dbgif-test-client --server 127.0.0.1:5555 --test connection
+./target/release/dbgif-integrated-test --server 127.0.0.1:5555 --test connection
 
 # Tests:
 # - TCP connection to server
@@ -99,7 +85,7 @@ ls target/release/
 ### Host Services Test
 ```bash
 # Test server's built-in host services
-./target/release/dbgif-test-client --server 127.0.0.1:5555 --test host-services
+./target/release/dbgif-integrated-test --server 127.0.0.1:5555 --test host-services
 
 # Tests:
 # - host:version (server version info)
@@ -112,7 +98,7 @@ ls target/release/
 ### Device Selection and Communication Test
 ```bash
 # Test device selection and command forwarding
-./target/release/dbgif-test-client --server 127.0.0.1:5555 --test device-communication
+./target/release/dbgif-integrated-test --server 127.0.0.1:5555 --test device-communication
 
 # Tests:
 # - Device discovery via host:list
@@ -126,7 +112,7 @@ ls target/release/
 ### Stream Multiplexing Test
 ```bash
 # Test multiple concurrent streams
-./target/release/dbgif-test-client --server 127.0.0.1:5555 --test streams
+./target/release/dbgif-integrated-test --server 127.0.0.1:5555 --test streams
 
 # Tests:
 # - Multiple OPEN commands with different stream IDs
@@ -139,7 +125,7 @@ ls target/release/
 ### Multi-Client Test
 ```bash
 # Test multiple clients accessing same device
-./target/release/dbgif-test-client --server 127.0.0.1:5555 --test multi-client --concurrent 3
+./target/release/dbgif-integrated-test --server 127.0.0.1:5555 --test multi-client --concurrent 3
 
 # Tests:
 # - 3 clients connecting simultaneously
@@ -152,7 +138,7 @@ ls target/release/
 ### Performance Test
 ```bash
 # Test server performance under load
-./target/release/dbgif-test-client --server 127.0.0.1:5555 --test performance --connections 50
+./target/release/dbgif-integrated-test --server 127.0.0.1:5555 --test performance --connections 50
 
 # Tests:
 # - 50 concurrent client connections
@@ -165,7 +151,7 @@ ls target/release/
 ### Protocol Compliance Test
 ```bash
 # Test ADB protocol format compliance
-./target/release/dbgif-test-client --server 127.0.0.1:5555 --test protocol-compliance
+./target/release/dbgif-integrated-test --server 127.0.0.1:5555 --test protocol-compliance
 
 # Tests:
 # - 24-byte header format validation
@@ -196,7 +182,7 @@ ls target/release/
 
 ### Test Client Options
 ```bash
-./target/release/dbgif-test-client --help
+./target/release/dbgif-integrated-test --help
 
 # Key options:
 --server 127.0.0.1:5555       # DBGIF server address
@@ -212,7 +198,7 @@ ls target/release/
 
 ### TCP Device Test Server Options
 ```bash
-./target/release/tcp-device-test-server --help
+./target/release/dbgif-integrated-test (device mode) --help
 
 # Key options:
 --port 5557                   # Listening port
@@ -296,7 +282,7 @@ telnet 127.0.0.1 5555
 telnet 127.0.0.1 5557
 
 # Verify ADB message format
-./target/release/dbgif-test-client --test protocol-compliance --verbose
+./target/release/dbgif-integrated-test --test protocol-compliance --verbose
 ```
 
 ### Protocol Issues
@@ -305,7 +291,7 @@ telnet 127.0.0.1 5557
 ./target/release/dbgif-server --log-level debug
 
 # Check message format compliance
-./target/release/dbgif-test-client --output adb-wire --verbose
+./target/release/dbgif-integrated-test --output adb-wire --verbose
 
 # Common issues:
 # - Incorrect CRC32 calculation
@@ -358,7 +344,7 @@ cargo test --test integration_tests
 cargo bench --bench adb_throughput
 
 # Test concurrent connection handling
-./target/release/dbgif-test-client --test performance --connections 100
+./target/release/dbgif-integrated-test --test performance --connections 100
 ```
 
 ## ADB Protocol Compliance

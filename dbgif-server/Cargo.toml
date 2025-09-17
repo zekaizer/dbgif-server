@@ -30,11 +30,3 @@ tempfile = "3.0"
 [[bin]]
 name = "dbgif-server"
 path = "src/bin/dbgif-server.rs"
-
-[[bin]]
-name = "dbgif-test-client"
-path = "src/bin/dbgif-test-client.rs"
-
-[[bin]]
-name = "tcp-device-test-server"
-path = "src/bin/tcp-device-test-server.rs"
