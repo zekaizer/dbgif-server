@@ -12,6 +12,9 @@ use dbgif_integrated_test::{
         BasicConnectionScenario,
         HostServicesScenario,
         MultiDeviceScenario,
+        ThroughputScenario,
+        LatencyScenario,
+        ConnectionLimitScenario,
     },
 };
 
@@ -279,9 +282,18 @@ async fn run_scenario(
         "multi_device" | "multi" => {
             manager.add_scenario(Box::new(MultiDeviceScenario::new(server_addr, device_count)));
         }
+        "throughput" => {
+            manager.add_scenario(Box::new(ThroughputScenario::new(server_addr)));
+        }
+        "latency" => {
+            manager.add_scenario(Box::new(LatencyScenario::new(server_addr)));
+        }
+        "connection_limit" | "connections" => {
+            manager.add_scenario(Box::new(ConnectionLimitScenario::new(server_addr)));
+        }
         _ => {
             error!("Unknown scenario: {}", name);
-            error!("Available scenarios: basic_connection, host_services, multi_device");
+            error!("Available scenarios: basic_connection, host_services, multi_device, throughput, latency, connection_limit");
             return Err(anyhow::anyhow!("Unknown scenario: {}", name));
         }
     }
@@ -295,6 +307,9 @@ fn list_scenarios() {
     println!("  - basic_connection (basic): Test basic device connection");
     println!("  - host_services (host): Test host service commands");
     println!("  - multi_device (multi): Test multiple device connections");
+    println!("  - throughput: Test data throughput performance");
+    println!("  - latency: Test round-trip latency");
+    println!("  - connection_limit (connections): Test maximum concurrent connections");
 }
 
 async fn run_interactive(server_addr: SocketAddr, _timeout: u64) -> Result<()> {
