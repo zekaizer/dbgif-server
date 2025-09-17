@@ -1,4 +1,5 @@
 use crate::protocol::ascii;
+use crate::server::device_manager::DeviceManager;
 use crate::server::state::ServerState;
 use crate::server::stream_forwarder::StreamForwarder;
 use std::collections::HashMap;
@@ -23,6 +24,8 @@ struct StreamBuffer {
 pub struct AsciiHandler {
     /// Server state
     server_state: Arc<ServerState>,
+    /// Device manager for device connections
+    device_manager: Arc<DeviceManager>,
     /// Stream forwarder for device communication
     stream_forwarder: Arc<StreamForwarder>,
     /// Active stream mappings with buffers (client_stream_id -> (device_stream_id, buffer))
@@ -37,11 +40,13 @@ impl AsciiHandler {
     /// Create a new ASCII protocol handler
     pub fn new(
         server_state: Arc<ServerState>,
+        device_manager: Arc<DeviceManager>,
         stream_forwarder: Arc<StreamForwarder>,
         session_id: String,
     ) -> Self {
         Self {
             server_state,
+            device_manager,
             stream_forwarder,
             stream_mappings: Arc::new(RwLock::new(HashMap::new())),
             selected_device: Arc::new(RwLock::new(None)),
@@ -50,14 +55,14 @@ impl AsciiHandler {
     }
 
     /// Handle a client connection with ASCII protocol
-    pub async fn handle_connection(&self, mut stream: TcpStream) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn handle_connection(&self, mut stream: TcpStream) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let peer_addr = stream.peer_addr()?;
         info!("Handling ASCII connection from {} (session: {})", peer_addr, self.session_id);
 
         loop {
-            // Read request length (4 hex bytes)
-            let mut len_buf = [0u8; 4];
-            match stream.read_exact(&mut len_buf).await {
+            // Read first 4 bytes to determine message type
+            let mut prefix_buf = [0u8; 4];
+            match stream.read_exact(&mut prefix_buf).await {
                 Ok(_) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
                     debug!("Client {} disconnected", peer_addr);
@@ -69,26 +74,72 @@ impl AsciiHandler {
                 }
             }
 
-            // Parse length
-            let len_str = std::str::from_utf8(&len_buf)?;
-            let length = u32::from_str_radix(len_str, 16)? as usize;
+            // Check if it's a STRM command or regular request
+            if &prefix_buf == b"STRM" {
+                // Handle STRM command
+                // Read the length (4 hex bytes)
+                let mut len_buf = [0u8; 4];
+                stream.read_exact(&mut len_buf).await?;
+                let len_str = std::str::from_utf8(&len_buf)?;
+                let length = u32::from_str_radix(len_str, 16)? as usize;
 
-            if length > 65536 {
-                error!("Request too large from {}: {} bytes", peer_addr, length);
-                break;
+                // Read stream_id (2 hex bytes) and data
+                if length >= 2 {
+                    let mut stream_data = vec![0u8; length];
+                    stream.read_exact(&mut stream_data).await?;
+
+                    // Parse stream_id from first 2 bytes
+                    let stream_id_str = std::str::from_utf8(&stream_data[..2])?;
+                    let stream_id = u8::from_str_radix(stream_id_str, 16)?;
+
+                    // Get actual data (skip stream_id bytes)
+                    let data = &stream_data[2..];
+
+                    debug!("Received STRM: stream_id={}, data_len={}", stream_id, data.len());
+
+                    // Forward STRM data to device (not immediate echo)
+                    match self.forward_to_device("device-127.0.0.1:5557", stream_id, data).await {
+                        Ok(response_data) => {
+                            let response = crate::protocol::ascii::encode_strm(stream_id, &response_data);
+                            stream.write_all(&response).await?;
+                            stream.flush().await?;
+                        }
+                        Err(e) => {
+                            warn!("Failed to forward to device: {}", e);
+                            // Encode FAIL response manually: "FAIL" + 4-byte hex length + message
+                            let error_msg = b"Device forwarding failed";
+                            let hex_length = format!("{:04x}", error_msg.len());
+                            let mut error_response = Vec::new();
+                            error_response.extend_from_slice(b"FAIL");
+                            error_response.extend_from_slice(hex_length.as_bytes());
+                            error_response.extend_from_slice(error_msg);
+                            stream.write_all(&error_response).await?;
+                            stream.flush().await?;
+                        }
+                    }
+                }
+            } else {
+                // Regular ASCII request - prefix_buf contains the length
+                let len_str = std::str::from_utf8(&prefix_buf)?;
+                let length = u32::from_str_radix(len_str, 16)? as usize;
+
+                if length > 65536 {
+                    error!("Request too large from {}: {} bytes", peer_addr, length);
+                    break;
+                }
+
+                // Read request data
+                let mut request_buf = vec![0u8; length];
+                stream.read_exact(&mut request_buf).await?;
+
+                let request = String::from_utf8_lossy(&request_buf);
+                debug!("Request from {}: '{}'", peer_addr, request);
+
+                // Process request and send response
+                let response = self.process_request(&request).await;
+                stream.write_all(&response).await?;
+                stream.flush().await?;
             }
-
-            // Read request data
-            let mut request_buf = vec![0u8; length];
-            stream.read_exact(&mut request_buf).await?;
-
-            let request = String::from_utf8_lossy(&request_buf);
-            debug!("Request from {}: '{}'", peer_addr, request);
-
-            // Process request and send response
-            let response = self.process_request(&request).await;
-            stream.write_all(&response).await?;
-            stream.flush().await?;
         }
 
         // Clean up temporary devices for this session
@@ -537,113 +588,34 @@ impl AsciiHandler {
                     // Forward data to device
                     debug!("STRM message for stream {:02x}: {} bytes", stream_id, payload.len());
 
-                    // Buffer the data for this stream
-                    let result = {
-                        let mut mappings = self.stream_mappings.write().await;
-                        if let Some((device_stream_id, buffer)) = mappings.get_mut(&stream_id) {
-                            // Add data to stream buffer
-                            buffer.pending_data.extend_from_slice(&payload);
-
-                            info!("Buffered {} bytes for stream {:02x} (device stream {}, total buffered: {} bytes)",
-                                  payload.len(), stream_id, device_stream_id, buffer.pending_data.len());
-
-                            // Flow control: if buffer is getting large, apply back-pressure
-                            const MAX_BUFFER_SIZE: usize = 65536;  // 64KB threshold
-                            if buffer.pending_data.len() > MAX_BUFFER_SIZE {
-                                error!("Stream {:02x} buffer overflow: {} bytes exceeds limit",
-                                       stream_id, buffer.pending_data.len());
-
-                                // Deactivate stream to prevent more data
-                                buffer.active = false;
-
-                                // Clear excess data to prevent memory issues
-                                if buffer.pending_data.len() > MAX_BUFFER_SIZE * 2 {
-                                    warn!("Truncating stream {:02x} buffer from {} to {} bytes",
-                                          stream_id, buffer.pending_data.len(), MAX_BUFFER_SIZE);
-                                    buffer.pending_data.truncate(MAX_BUFFER_SIZE);
-                                }
-
-                                // Return error response for flow control
-                                return self.create_fail_response("stream buffer overflow - flow control activated");
-                            }
-
-                            Ok(*device_stream_id)
-                        } else {
-                            Err("stream not found")
-                        }
+                    // Get selected device
+                    let selected_device = {
+                        let selected = self.selected_device.read().await;
+                        selected.clone()
                     };
 
-                    match result {
-                        Ok(_device_stream_id) => {
-                            // Process the buffered data immediately if device is connected
-                            if let Some(device_id) = self.selected_device.read().await.as_ref() {
-                                // Check if device is actually connected
-                                let device_connected = self.server_state.device_registry
-                                    .get_device(device_id)
-                                    .ok()
-                                    .and_then(|opt_dev| opt_dev)
-                                    .map(|dev| dev.state == crate::server::device_registry::DeviceState::Connected)
-                                    .unwrap_or(false);
-
-                                if device_connected {
-                                    // Get and clear the buffer
-                                    let data_to_send = {
-                                        let mut mappings = self.stream_mappings.write().await;
-                                        if let Some((_, buffer)) = mappings.get_mut(&stream_id) {
-                                            if !buffer.pending_data.is_empty() {
-                                                let data = buffer.pending_data.clone();
-                                                buffer.pending_data.clear();
-                                                Some(data)
-                                            } else {
-                                                None
-                                            }
-                                        } else {
-                                            None
-                                        }
-                                    };
-
-                                    if let Some(data) = data_to_send {
-                                        info!("Sending {} bytes to device {} for stream {:02x}",
-                                              data.len(), device_id, stream_id);
-
-                                        // Forward data to device using stream forwarder
-                                        // Get device stream ID from mappings
-                                        let device_stream_id_to_use = {
-                                            let mappings = self.stream_mappings.read().await;
-                                            mappings.get(&stream_id).map(|(id, _)| *id)
-                                        };
-
-                                        if let Some(dev_stream_id) = device_stream_id_to_use {
-                                            let client_stream_id = stream_id as u32;
-
-                                            // Use stream forwarder to send data downstream to device
-                                            match self.stream_forwarder.forward_downstream(
-                                                self.session_id.clone(),
-                                                client_stream_id,
-                                                dev_stream_id,
-                                                data,
-                                            ).await {
-                                                Ok(messages) => {
-                                                    info!("Successfully forwarded data to device, {} messages generated",
-                                                          messages.len());
-                                                }
-                                                Err(e) => {
-                                                    error!("Failed to forward data to device: {}", e);
-                                                }
-                                            }
-                                        }
+                    match selected_device {
+                        Some(device_id) => {
+                            // Forward to device using stream forwarder
+                            match self.forward_to_device(&device_id, stream_id, &payload).await {
+                                Ok(response_data) => {
+                                    // Return response from device in STRM format
+                                    if !response_data.is_empty() {
+                                        crate::protocol::ascii::encode_strm(stream_id, &response_data)
+                                    } else {
+                                        // No response data, send OKAY
+                                        self.create_okay_response(&[])
                                     }
-                                } else {
-                                    debug!("Device {} not connected, data buffered for stream {:02x}",
-                                           device_id, stream_id);
+                                }
+                                Err(e) => {
+                                    warn!("Failed to forward to device {}: {}", device_id, e);
+                                    self.create_fail_response("device communication failed")
                                 }
                             }
-
-                            self.create_okay_response(&[])
                         }
-                        Err(e) => {
-                            warn!("Stream {:02x} not found in mappings", stream_id);
-                            self.create_fail_response(e)
+                        None => {
+                            warn!("No device selected for STRM message");
+                            self.create_fail_response("no device selected")
                         }
                     }
                 }
@@ -717,6 +689,84 @@ impl AsciiHandler {
         response.extend_from_slice(message.as_bytes());
 
         response
+    }
+
+    /// Forward STRM data to device and wait for response
+    async fn forward_to_device(&self, device_id: &str, _stream_id: u8, data: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+        debug!("Forwarding data to device {}: bytes={}", device_id, data.len());
+
+        // Convert ASCII stream ID and data to ADB WRTE message format
+        let wrte_message = crate::protocol::message::AdbMessage::new_wrte(
+            1, // local stream id
+            1, // remote stream id
+            Vec::from(data),
+        );
+
+        // Serialize the ADB message to bytes
+        let encoded_message = wrte_message.serialize();
+
+        // Ensure device is connected through DeviceManager (uses existing connection or creates one)
+        if let Err(e) = self.device_manager.get_device_connection(device_id).await {
+            warn!("Failed to ensure device connection for {}: {}", device_id, e);
+            return Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::ConnectionRefused,
+                format!("Cannot connect to device {}: {}", device_id, e)
+            )));
+        }
+
+        info!("Sending ADB WRTE message to device {} ({} bytes)", device_id, encoded_message.len());
+
+        // Send ADB message through DeviceManager (reuses existing connection)
+        match self.device_manager.send_to_device(device_id, &encoded_message).await {
+            Ok(bytes_sent) => {
+                debug!("Successfully sent {} bytes to device {}", bytes_sent, device_id);
+
+                // Prepare buffer for response
+                let mut response_buffer = vec![0u8; 4096];
+
+                // Receive response through DeviceManager
+                match self.device_manager.receive_from_device(device_id, &mut response_buffer).await {
+                    Ok(bytes_received) if bytes_received > 0 => {
+                        response_buffer.truncate(bytes_received);
+                        debug!("Received {} bytes from device {}", bytes_received, device_id);
+
+                        // Parse ADB response message
+                        match crate::protocol::message::AdbMessage::deserialize(&response_buffer) {
+                            Ok(response_message) => {
+                                debug!("Parsed ADB response from device {}: {} bytes data", device_id, response_message.data.len());
+                                Ok(response_message.data)
+                            }
+                            Err(e) => {
+                                // If parsing fails, return raw data (device might not be using ADB protocol)
+                                warn!("Failed to parse ADB response from device {}: {}", device_id, e);
+                                Ok(response_buffer)
+                            }
+                        }
+                    }
+                    Ok(_) => {
+                        warn!("Device {} returned empty response", device_id);
+                        Err(Box::new(std::io::Error::new(
+                            std::io::ErrorKind::UnexpectedEof,
+                            "Device returned empty response"
+                        )))
+                    }
+                    Err(e) => {
+                        warn!("Failed to receive response from device {}: {}", device_id, e);
+                        Err(Box::new(std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            format!("Receive failed: {}", e)
+                        )))
+                    }
+                }
+            }
+            Err(e) => {
+                warn!("Failed to send message to device {}: {}", device_id, e);
+                Err(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("Send failed: {}", e)
+                )))
+            }
+        }
     }
 
 }

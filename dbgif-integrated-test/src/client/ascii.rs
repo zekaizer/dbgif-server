@@ -105,4 +105,18 @@ impl AsciiClient {
             Err(anyhow::anyhow!("host:connect failed: {}", response))
         }
     }
+
+    /// Open a service on the selected device
+    pub async fn open_service(&mut self, service: &str) -> Result<()> {
+        info!("Opening service: {}", service);
+        self.send_command(service).await?;
+        let (success, response) = self.receive_response().await?;
+
+        if success {
+            info!("✅ Service '{}' opened successfully: {}", service, response);
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("Failed to open service '{}': {}", service, response))
+        }
+    }
 }

@@ -72,4 +72,10 @@ impl TestClient {
         self.ascii()?.test_host_connect(device_ip, device_port).await?;
         Ok(())
     }
+
+    /// Open a service on the connected device
+    pub async fn open_device_service(&mut self, service: &str) -> Result<()> {
+        self.ascii()?.open_service(service).await?;
+        Ok(())
+    }
 }

@@ -5,7 +5,7 @@ use crate::transport::{Connection, Transport, TransportAddress, TcpTransport};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex};
 use tokio::time::{interval, timeout};
 use tracing::{debug, info, warn};
 
@@ -31,8 +31,8 @@ struct DeviceConnection {
     /// Device information
     #[allow(dead_code)]
     device_info: DeviceInfo,
-    /// Transport connection to device
-    connection: Box<dyn Connection>,
+    /// Transport connection to device (wrapped in Arc<Mutex> for safe concurrent access)
+    connection: Arc<Mutex<Box<dyn Connection>>>,
     /// Connection established timestamp
     connected_at: Instant,
     /// Last activity timestamp
@@ -238,7 +238,7 @@ impl DeviceManager {
         // Create device connection
         let device_connection = DeviceConnection {
             device_info: device_info.clone(),
-            connection: Box::new(connection),
+            connection: Arc::new(Mutex::new(Box::new(connection))),
             connected_at: Instant::now(),
             last_activity: Instant::now(),
             health_status: ConnectionHealth::Healthy,
@@ -272,11 +272,13 @@ impl DeviceManager {
             connections.remove(device_id)
         };
 
-        if let Some(mut connection) = connection {
+        if let Some(connection) = connection {
             // Close the connection
-            if let Err(e) = connection.connection.close().await {
+            let mut conn_guard = connection.connection.lock().await;
+            if let Err(e) = conn_guard.close().await {
                 warn!("Error closing device connection {}: {}", device_id, e);
             }
+            drop(conn_guard);
 
             // Update device state in registry
             self.device_registry.update_device_state(device_id, DeviceState::Discovered)?;
@@ -310,23 +312,30 @@ impl DeviceManager {
         // Ensure device is connected
         self.get_device_connection(device_id).await?;
 
-        // Send data
-        let mut connections = self.active_connections.write().unwrap();
-        match connections.get_mut(device_id) {
-            Some(device_connection) => {
-                device_connection.connection.send_bytes(data).await
-                    .map_err(|e| ProtocolError::DeviceConnectionFailed {
+        // Get the connection Arc<Mutex<>> to release RwLock quickly
+        let connection = {
+            let mut connections = self.active_connections.write().unwrap();
+            match connections.get_mut(device_id) {
+                Some(device_connection) => {
+                    device_connection.last_activity = Instant::now();
+                    Arc::clone(&device_connection.connection)
+                }
+                None => {
+                    return Err(ProtocolError::DeviceNotFound {
                         device_id: device_id.to_string(),
-                        reason: e.to_string(),
-                    })?;
-                let bytes_sent = data.len();
-
-                device_connection.last_activity = Instant::now();
-                Ok(bytes_sent)
+                    })
+                }
             }
-            None => Err(ProtocolError::DeviceNotFound {
+        };
+
+        // Now send data without holding RwLock
+        let mut conn_guard = connection.lock().await;
+        match conn_guard.send_bytes(data).await {
+            Ok(_) => Ok(data.len()),
+            Err(e) => Err(ProtocolError::DeviceConnectionFailed {
                 device_id: device_id.to_string(),
-            }),
+                reason: e.to_string(),
+            })
         }
     }
 
@@ -335,26 +344,36 @@ impl DeviceManager {
         // Ensure device is connected
         self.get_device_connection(device_id).await?;
 
-        // Receive data
-        let mut connections = self.active_connections.write().unwrap();
-        match connections.get_mut(device_id) {
-            Some(device_connection) => {
-                let bytes_received = match device_connection.connection.receive_bytes(buffer).await
-                    .map_err(|e| ProtocolError::DeviceConnectionFailed {
+        // Get the connection Arc<Mutex<>> to release RwLock quickly
+        let connection = {
+            let mut connections = self.active_connections.write().unwrap();
+            match connections.get_mut(device_id) {
+                Some(device_connection) => {
+                    device_connection.last_activity = Instant::now();
+                    Arc::clone(&device_connection.connection)
+                }
+                None => {
+                    return Err(ProtocolError::DeviceNotFound {
                         device_id: device_id.to_string(),
-                        reason: e.to_string(),
-                    })? {
-                        Some(bytes) => bytes,
-                        None => 0, // Connection closed
-                    };
-
-                device_connection.last_activity = Instant::now();
-                Ok(bytes_received)
+                    })
+                }
             }
-            None => Err(ProtocolError::DeviceNotFound {
-                device_id: device_id.to_string(),
-            }),
-        }
+        };
+
+        // Now receive data without holding RwLock
+        let mut conn_guard = connection.lock().await;
+        let bytes_received = match conn_guard.receive_bytes(buffer).await {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => 0, // Connection closed
+            Err(e) => {
+                return Err(ProtocolError::DeviceConnectionFailed {
+                    device_id: device_id.to_string(),
+                    reason: e.to_string(),
+                })
+            }
+        };
+
+        Ok(bytes_received)
     }
 
     /// Get list of connected devices
@@ -479,11 +498,18 @@ impl DeviceManager {
                 let start_time = Instant::now();
 
                 // Implement health check by validating connection state and device registry status
-                let is_healthy = {
+                // Get connection Arc to release RwLock quickly
+                let connection_opt = {
                     let connections = self.active_connections.read().unwrap();
-                    if let Some(conn) = connections.get(&device_id) {
+                    connections.get(&device_id).map(|conn| Arc::clone(&conn.connection))
+                };
+
+                let is_healthy = match connection_opt {
+                    Some(connection) => {
                         // Check basic connection status
-                        if conn.connection.is_connected() {
+                        let conn_guard = connection.lock().await;
+                        if conn_guard.is_connected() {
+                            drop(conn_guard); // Release mutex before registry check
                             // Also verify device is still in registry and in good state
                             match self.device_registry.get_device(&device_id) {
                                 Ok(Some(device_info)) => {
@@ -511,7 +537,8 @@ impl DeviceManager {
                             debug!("Device {} connection is not active", device_id);
                             false
                         }
-                    } else {
+                    }
+                    None => {
                         debug!("Device {} has no active connection", device_id);
                         false
                     }

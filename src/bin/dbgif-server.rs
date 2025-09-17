@@ -149,7 +149,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Initialize core components
     let connection_manager = ConnectionManager::new(Arc::clone(&server_state));
-    let device_manager = DeviceManager::new(Arc::clone(&server_state), Arc::clone(&device_registry));
+    let device_manager = Arc::new(DeviceManager::new(Arc::clone(&server_state), Arc::clone(&device_registry)));
     let stream_forwarder = Arc::new(StreamForwarder::new(Arc::clone(&server_state)));
     let _message_dispatcher = MessageDispatcher::new(Arc::clone(&server_state));
 
@@ -180,7 +180,7 @@ async fn main() -> anyhow::Result<()> {
         }
 
         // Accept connections using ASCII protocol
-        result = accept_connections(listener, Arc::clone(&server_state), Arc::clone(&stream_forwarder)) => {
+        result = accept_connections(listener, Arc::clone(&server_state), Arc::clone(&device_manager), Arc::clone(&stream_forwarder)) => {
             if let Err(e) = result {
                 error!("Server error: {}", e);
                 return Err(e);
@@ -248,6 +248,7 @@ async fn setup_shutdown_handler() {
 async fn accept_connections(
     listener: TcpListener,
     server_state: Arc<ServerState>,
+    device_manager: Arc<DeviceManager>,
     stream_forwarder: Arc<StreamForwarder>,
 ) -> anyhow::Result<()> {
     info!("Connection acceptance loop started");
@@ -266,6 +267,7 @@ async fn accept_connections(
                 // Create ASCII handler for this connection
                 let handler = AsciiHandler::new(
                     Arc::clone(&server_state),
+                    Arc::clone(&device_manager),
                     Arc::clone(&stream_forwarder),
                     session_id.clone(),
                 );

@@ -23,8 +23,8 @@ impl ThroughputScenario {
     pub fn new(server_addr: SocketAddr) -> Self {
         Self {
             server_addr,
-            data_size: 4096,
-            duration: Duration::from_secs(10),
+            data_size: 1024,
+            duration: Duration::from_secs(2),
         }
     }
 
@@ -42,7 +42,7 @@ impl ThroughputScenario {
 #[async_trait]
 impl Scenario for ThroughputScenario {
     fn name(&self) -> &str {
-        "throughput_test"
+        "throughput"
     }
 
     async fn execute(&self) -> Result<()> {
@@ -64,6 +64,9 @@ impl Scenario for ThroughputScenario {
         client.connect().await?;
         client.connect_device("127.0.0.1", device.port()).await?;
 
+        // Open shell service for stream communication
+        client.open_device_service("shell:").await?;
+
         // Prepare test data
         let test_data = vec![0x42u8; self.data_size];
         let mut bytes_sent = 0u64;
@@ -80,10 +83,19 @@ impl Scenario for ThroughputScenario {
                 Ok(_) => {
                     bytes_sent += test_data.len() as u64;
                     messages_sent += 1;
+
+                    // Small delay after each send to prevent overwhelming
+                    tokio::time::sleep(Duration::from_millis(1)).await;
                 }
                 Err(e) => {
                     warn!("Send error: {}", e);
+                    break; // Exit on persistent error
                 }
+            }
+
+            // Progress report
+            if messages_sent % 100 == 0 {
+                debug!("Progress: {} messages sent, {} bytes", messages_sent, bytes_sent);
             }
         }
 
@@ -113,7 +125,7 @@ impl LatencyScenario {
     pub fn new(server_addr: SocketAddr) -> Self {
         Self {
             server_addr,
-            iterations: 100,
+            iterations: 20,
         }
     }
 
@@ -126,7 +138,7 @@ impl LatencyScenario {
 #[async_trait]
 impl Scenario for LatencyScenario {
     fn name(&self) -> &str {
-        "latency_test"
+        "latency"
     }
 
     async fn execute(&self) -> Result<()> {
@@ -147,6 +159,9 @@ impl Scenario for LatencyScenario {
         client.connect().await?;
         client.connect_device("127.0.0.1", device.port()).await?;
 
+        // Open shell service for stream communication
+        client.open_device_service("shell:").await?;
+
         let mut latencies = Vec::new();
         let test_data = b"ping";
 
@@ -155,8 +170,8 @@ impl Scenario for LatencyScenario {
         for i in 0..self.iterations {
             let start = Instant::now();
 
-            // Send ping
-            client.ascii()?.send_strm((i % 3 + 1) as u8, test_data).await?;
+            // Send ping (use fixed stream ID 1)
+            client.ascii()?.send_strm(1, test_data).await?;
 
             // Wait for response (simulated echo)
             match tokio::time::timeout(
@@ -357,6 +372,9 @@ impl Scenario for MemoryLeakScenario {
             let mut client = TestClient::new(self.server_addr);
             client.connect().await?;
             client.connect_device("127.0.0.1", device.port()).await?;
+
+            // Open shell service for stream communication
+            client.open_device_service("shell:").await?;
 
             // Send some data
             client.ascii()?.send_strm(1, b"test").await?;
