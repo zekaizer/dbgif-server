@@ -84,25 +84,27 @@ impl AsciiHandler {
             // Check if it's a STRM command or regular request
             if &prefix_buf == b"STRM" {
                 // Handle STRM command
-                // Read the length (4 hex bytes)
-                let mut len_buf = [0u8; 4];
+                // Read stream ID (2 hex bytes)
+                let mut stream_id_buf = [0u8; 2];
+                stream.read_exact(&mut stream_id_buf).await?;
+                let stream_id_str = std::str::from_utf8(&stream_id_buf)?;
+                let stream_id = u8::from_str_radix(stream_id_str, 16)?;
+
+                // Read the length (6 hex bytes for STRM)
+                let mut len_buf = [0u8; 6];
                 stream.read_exact(&mut len_buf).await?;
                 let len_str = std::str::from_utf8(&len_buf)?;
                 let length = u32::from_str_radix(len_str, 16)? as usize;
 
-                // Read stream_id (2 hex bytes) and data
-                if length >= 2 {
+                debug!("Received STRM: stream_id={:02x}, length={}", stream_id, length);
+
+                // Handle based on length
+                if length > 0 {
                     let mut stream_data = vec![0u8; length];
                     stream.read_exact(&mut stream_data).await?;
 
-                    // Parse stream_id from first 2 bytes
-                    let stream_id_str = std::str::from_utf8(&stream_data[..2])?;
-                    let stream_id = u8::from_str_radix(stream_id_str, 16)?;
-
-                    // Get actual data (skip stream_id bytes)
-                    let data = &stream_data[2..];
-
-                    debug!("Received STRM: stream_id={}, data_len={}", stream_id, data.len());
+                    let data = &stream_data[..];
+                    debug!("STRM data: {} bytes", data.len());
 
                     // Forward STRM data to device (not immediate echo)
                     match self.forward_to_device("device-127.0.0.1:5557", stream_id, data).await {
@@ -124,6 +126,28 @@ impl AsciiHandler {
                             stream.flush().await?;
                         }
                     }
+                } else {
+                    // Zero-length STRM closes the stream
+                    info!("Closing stream {:02x}", stream_id);
+
+                    // Close stream in the forwarder
+                    let result = self.stream_forwarder.close_stream(
+                        self.session_id.clone(),
+                        stream_id as u32,
+                        stream_id as u32,
+                        "Client closed stream".to_string(),
+                    ).await;
+
+                    if let Err(e) = result {
+                        warn!("Failed to close stream {:02x}: {}", stream_id, e);
+                    }
+
+                    self.close_stream(stream_id).await;
+
+                    // Send OKAY response for stream closure
+                    let response = self.create_okay_response(&[]);
+                    stream.write_all(&response).await?;
+                    stream.flush().await?;
                 }
             } else {
                 // Regular ASCII request - prefix_buf contains the length
