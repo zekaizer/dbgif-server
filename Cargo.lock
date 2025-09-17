@@ -250,6 +250,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "dbgif-protocol-core"
+version = "0.1.0"
+dependencies = [
+ "crc32fast",
+ "rand",
+]
+
+[[package]]
 name = "dbgif-server"
 version = "0.1.0"
 dependencies = [

@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "dbgif-protocol",
+    "dbgif-protocol-core",
     "dbgif-transport",
     "dbgif-server",
     "dbgif-integrated-test",
