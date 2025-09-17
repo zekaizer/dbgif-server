@@ -52,15 +52,16 @@ pub fn decode_response(data: &[u8]) -> Result<(bool, Vec<u8>)> {
 }
 
 pub fn encode_strm(stream_id: u8, data: &[u8]) -> Vec<u8> {
-    let mut result = Vec::with_capacity(9 + data.len());
+    let mut result = Vec::with_capacity(10 + data.len());
 
     result.extend_from_slice(b"STRM");
 
-    let length = 1 + data.len();
+    let length = 2 + data.len(); // 2 bytes for hex stream_id + data length
     let hex_length = format!("{:04x}", length);
     result.extend_from_slice(hex_length.as_bytes());
 
-    result.push(stream_id);
+    let hex_stream_id = format!("{:02x}", stream_id);
+    result.extend_from_slice(hex_stream_id.as_bytes());
 
     result.extend_from_slice(data);
 
@@ -68,7 +69,7 @@ pub fn encode_strm(stream_id: u8, data: &[u8]) -> Vec<u8> {
 }
 
 pub fn decode_strm(data: &[u8]) -> Result<(u8, Vec<u8>)> {
-    if data.len() < 9 {
+    if data.len() < 10 {
         return Err(AsciiProtocolError::InvalidStrmFormat);
     }
 
@@ -86,12 +87,16 @@ pub fn decode_strm(data: &[u8]) -> Result<(u8, Vec<u8>)> {
         return Err(AsciiProtocolError::InvalidStrmFormat);
     }
 
-    if length < 1 {
+    if length < 2 {
         return Err(AsciiProtocolError::InvalidStrmFormat);
     }
 
-    let stream_id = data[8];
-    let payload = data[9..8 + length].to_vec();
+    let stream_id_str = std::str::from_utf8(&data[8..10])
+        .map_err(|_| AsciiProtocolError::InvalidStrmFormat)?;
+    let stream_id = u8::from_str_radix(stream_id_str, 16)
+        .map_err(|_| AsciiProtocolError::InvalidStrmFormat)?;
+
+    let payload = data[10..8 + length].to_vec();
 
     Ok((stream_id, payload))
 }
@@ -131,14 +136,14 @@ mod tests {
         let encoded = encode_strm(stream_id, data);
 
         assert_eq!(&encoded[0..4], b"STRM");
-        assert_eq!(&encoded[4..8], b"000a");
-        assert_eq!(encoded[8], 0x42);
-        assert_eq!(&encoded[9..], b"test data");
+        assert_eq!(&encoded[4..8], b"000b"); // 2 bytes for hex stream_id + 9 bytes data = 11 = 0x0b
+        assert_eq!(&encoded[8..10], b"42"); // hex string representation
+        assert_eq!(&encoded[10..], b"test data");
     }
 
     #[test]
     fn test_decode_strm() {
-        let data = b"STRM000a\x42test data";
+        let data = b"STRM000b42test data"; // hex string "42" instead of binary 0x42
         let (stream_id, payload) = decode_strm(data).unwrap();
         assert_eq!(stream_id, 0x42);
         assert_eq!(payload, b"test data");
