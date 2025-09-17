@@ -86,7 +86,7 @@ mod tests {
 
         // Version should contain package name and version
         let version = service.version_string();
-        assert!(version.contains("dbgif-protocol")); // Package name from Cargo.toml
+        assert!(version.contains("dbgif-server")); // Package name from Cargo.toml
         assert!(!version.is_empty());
     }
 
@@ -110,7 +110,7 @@ mod tests {
             HostServiceResponse::Okay(data) => {
                 let response = String::from_utf8(data).unwrap();
                 assert!(!response.is_empty());
-                assert!(response.contains("dbgif-protocol")); // Should contain package name
+                assert!(response.contains("dbgif-server")); // Should contain package name
             }
             _ => panic!("Expected Okay response"),
         }

@@ -1,12 +1,12 @@
 #[cfg(test)]
 mod tests {
-    use dbgif_protocol::host_services::*;
-    use dbgif_protocol::host_services::version::HostVersionService;
-    use dbgif_protocol::host_services::features::HostFeaturesService;
-    use dbgif_protocol::host_services::list::HostListService;
-    use dbgif_protocol::host_services::device::HostDeviceService;
-    use dbgif_protocol::server::device_registry::DeviceRegistry;
-    use dbgif_protocol::server::session::{ClientSessionInfo, ClientInfo, SessionState, SessionStats, ClientCapabilities};
+    use dbgif_server::host_services::*;
+    use dbgif_server::host_services::version::HostVersionService;
+    use dbgif_server::host_services::features::HostFeaturesService;
+    use dbgif_server::host_services::list::HostListService;
+    use dbgif_server::host_services::device::HostDeviceService;
+    use dbgif_server::server::device_registry::DeviceRegistry;
+    use dbgif_server::server::session::{ClientSessionInfo, ClientInfo, SessionState, SessionStats, ClientCapabilities};
     use std::sync::Arc;
     use std::collections::HashMap;
 
@@ -317,7 +317,7 @@ mod tests {
             &self.name
         }
 
-        async fn handle(&self, _session: &ClientSessionInfo, _args: &str) -> Result<HostServiceResponse, dbgif_protocol::protocol::error::ProtocolError> {
+        async fn handle(&self, _session: &ClientSessionInfo, _args: &str) -> Result<HostServiceResponse, dbgif_protocol::error::ProtocolError> {
             Ok(HostServiceResponse::okay_str("test response"))
         }
     }
