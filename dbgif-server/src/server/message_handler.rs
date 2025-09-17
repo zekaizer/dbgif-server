@@ -5,6 +5,7 @@ use tracing::{debug, error, info, warn};
 use dbgif_protocol::message::AdbMessage;
 use dbgif_protocol::commands::AdbCommand;
 use dbgif_protocol::error::{ProtocolError, ProtocolResult};
+use dbgif_protocol::crc::calculate_crc32;
 use crate::server::session::ClientSessionInfo;
 use crate::server::state::ServerState;
 use crate::server::dispatcher::MessageDispatcher;
@@ -157,7 +158,7 @@ impl MessageHandler {
 
         // Validate CRC32 if data present
         if !message.data.is_empty() {
-            let calculated_crc = crc32fast::hash(&message.data);
+            let calculated_crc = calculate_crc32(&message.data);
             if calculated_crc != message.data_crc32 {
                 return Err(ProtocolError::CrcValidationFailed {
                     expected: message.data_crc32,
