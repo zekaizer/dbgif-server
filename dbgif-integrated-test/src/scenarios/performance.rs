@@ -1,5 +1,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
+use std::env;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -21,10 +22,23 @@ pub struct ThroughputScenario {
 
 impl ThroughputScenario {
     pub fn new(server_addr: SocketAddr) -> Self {
+        // Read configuration from environment variables with defaults
+        let data_size = env::var("DBGIF_TEST_DATA_SIZE")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1024);
+
+        let duration_secs = env::var("DBGIF_TEST_DURATION")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(2);
+
+        info!("ThroughputScenario config: data_size={}, duration={}s", data_size, duration_secs);
+
         Self {
             server_addr,
-            data_size: 1024,
-            duration: Duration::from_secs(2),
+            data_size,
+            duration: Duration::from_secs(duration_secs),
         }
     }
 
@@ -84,8 +98,12 @@ impl Scenario for ThroughputScenario {
                     bytes_sent += test_data.len() as u64;
                     messages_sent += 1;
 
-                    // Small delay after each send to prevent overwhelming
-                    tokio::time::sleep(Duration::from_millis(1)).await;
+                    // Small delay after each send to prevent overwhelming (configurable)
+                    let delay_ms = env::var("DBGIF_TEST_SEND_DELAY_MS")
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(1);
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                 }
                 Err(e) => {
                     warn!("Send error: {}", e);
@@ -123,9 +141,17 @@ pub struct LatencyScenario {
 
 impl LatencyScenario {
     pub fn new(server_addr: SocketAddr) -> Self {
+        // Read iterations from environment variable with default
+        let iterations = env::var("DBGIF_TEST_LATENCY_ITERATIONS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(20);
+
+        info!("LatencyScenario config: iterations={}", iterations);
+
         Self {
             server_addr,
-            iterations: 20,
+            iterations,
         }
     }
 

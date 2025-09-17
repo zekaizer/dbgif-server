@@ -21,10 +21,16 @@ mod tests {
 
             let config = ServerConfig::default();
             let server_state = Arc::new(ServerState::new(config));
+            let device_registry = Arc::new(dbgif_protocol::server::device_registry::DeviceRegistry::new());
+            let device_manager = Arc::new(dbgif_protocol::server::device_manager::DeviceManager::new(
+                Arc::clone(&server_state),
+                Arc::clone(&device_registry),
+            ));
             let stream_forwarder = Arc::new(StreamForwarder::new(Arc::clone(&server_state)));
 
             let handler = AsciiHandler::new(
                 server_state,
+                device_manager,
                 stream_forwarder,
                 "test-session".to_string(),
             );
@@ -79,10 +85,16 @@ mod tests {
 
             let config = ServerConfig::default();
             let server_state = Arc::new(ServerState::new(config));
+            let device_registry = Arc::new(dbgif_protocol::server::device_registry::DeviceRegistry::new());
+            let device_manager = Arc::new(dbgif_protocol::server::device_manager::DeviceManager::new(
+                Arc::clone(&server_state),
+                Arc::clone(&device_registry),
+            ));
             let stream_forwarder = Arc::new(StreamForwarder::new(Arc::clone(&server_state)));
 
             let handler = AsciiHandler::new(
                 server_state,
+                device_manager,
                 stream_forwarder,
                 "test-session".to_string(),
             );
@@ -152,10 +164,16 @@ mod tests {
 
             let config = ServerConfig::default();
             let server_state = Arc::new(ServerState::new(config));
+            let device_registry = Arc::new(dbgif_protocol::server::device_registry::DeviceRegistry::new());
+            let device_manager = Arc::new(dbgif_protocol::server::device_manager::DeviceManager::new(
+                Arc::clone(&server_state),
+                Arc::clone(&device_registry),
+            ));
             let stream_forwarder = Arc::new(StreamForwarder::new(Arc::clone(&server_state)));
 
             let handler = AsciiHandler::new(
                 server_state,
+                device_manager,
                 stream_forwarder,
                 "test-session".to_string(),
             );
@@ -206,10 +224,16 @@ mod tests {
 
             let config = ServerConfig::default();
             let server_state = Arc::new(ServerState::new(config));
+            let device_registry = Arc::new(dbgif_protocol::server::device_registry::DeviceRegistry::new());
+            let device_manager = Arc::new(dbgif_protocol::server::device_manager::DeviceManager::new(
+                Arc::clone(&server_state),
+                Arc::clone(&device_registry),
+            ));
             let stream_forwarder = Arc::new(StreamForwarder::new(Arc::clone(&server_state)));
 
             let handler = AsciiHandler::new(
                 server_state,
+                device_manager,
                 stream_forwarder,
                 "test-session".to_string(),
             );
@@ -262,10 +286,16 @@ mod tests {
 
             let config = ServerConfig::default();
             let server_state = Arc::new(ServerState::new(config));
+            let device_registry = Arc::new(dbgif_protocol::server::device_registry::DeviceRegistry::new());
+            let device_manager = Arc::new(dbgif_protocol::server::device_manager::DeviceManager::new(
+                Arc::clone(&server_state),
+                Arc::clone(&device_registry),
+            ));
             let stream_forwarder = Arc::new(StreamForwarder::new(Arc::clone(&server_state)));
 
             let handler = AsciiHandler::new(
                 server_state,
+                device_manager,
                 stream_forwarder,
                 "test-session".to_string(),
             );

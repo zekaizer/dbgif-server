@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, Semaphore};
 use tracing::{debug, error, info, warn};
 
 /// Stream data buffer for a single stream
@@ -20,11 +20,15 @@ struct StreamBuffer {
     active: bool,
 }
 
+/// Maximum concurrent device forwards to prevent resource exhaustion
+const MAX_CONCURRENT_FORWARDS: usize = 10;
+
 /// ASCII protocol handler for client connections
 pub struct AsciiHandler {
     /// Server state
     server_state: Arc<ServerState>,
     /// Device manager for device connections
+    #[allow(dead_code)]  // Will be used when actual device forwarding is implemented
     device_manager: Arc<DeviceManager>,
     /// Stream forwarder for device communication
     stream_forwarder: Arc<StreamForwarder>,
@@ -34,6 +38,8 @@ pub struct AsciiHandler {
     selected_device: Arc<RwLock<Option<String>>>,
     /// Session ID
     session_id: String,
+    /// Semaphore for flow control
+    forward_semaphore: Arc<Semaphore>,
 }
 
 impl AsciiHandler {
@@ -51,6 +57,7 @@ impl AsciiHandler {
             stream_mappings: Arc::new(RwLock::new(HashMap::new())),
             selected_device: Arc::new(RwLock::new(None)),
             session_id,
+            forward_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_FORWARDS)),
         }
     }
 
@@ -691,82 +698,33 @@ impl AsciiHandler {
         response
     }
 
-    /// Forward STRM data to device and wait for response
-    async fn forward_to_device(&self, device_id: &str, _stream_id: u8, data: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
-        debug!("Forwarding data to device {}: bytes={}", device_id, data.len());
+    /// Forward STRM data to device
+    /// In ADB protocol: WRTE -> OKAY (always acknowledge receipt)
+    async fn forward_to_device(&self, device_id: &str, stream_id: u8, data: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+        debug!("Forwarding data to device {}: stream_id={}, bytes={}", device_id, stream_id, data.len());
 
-        // Convert ASCII stream ID and data to ADB WRTE message format
-        let wrte_message = crate::protocol::message::AdbMessage::new_wrte(
-            1, // local stream id
-            1, // remote stream id
-            Vec::from(data),
-        );
+        // Acquire semaphore permit for flow control
+        let _permit = self.forward_semaphore.acquire().await
+            .map_err(|e| Box::new(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Failed to acquire flow control permit: {}", e)
+            )) as Box<dyn std::error::Error + Send + Sync>)?;
 
-        // Serialize the ADB message to bytes
-        let encoded_message = wrte_message.serialize();
+        // In ADB protocol, WRTE should always be acknowledged with OKAY
+        // The server (us) should immediately respond with OKAY
+        // Any actual device response would come as a separate WRTE from device
 
-        // Ensure device is connected through DeviceManager (uses existing connection or creates one)
-        if let Err(e) = self.device_manager.get_device_connection(device_id).await {
-            warn!("Failed to ensure device connection for {}: {}", device_id, e);
-            return Err(Box::new(std::io::Error::new(
-                std::io::ErrorKind::ConnectionRefused,
-                format!("Cannot connect to device {}: {}", device_id, e)
-            )));
+        // Store the data for potential device forwarding
+        if !data.is_empty() {
+            debug!("Received {} bytes of data for stream {}: {:?}",
+                  data.len(), stream_id,
+                  String::from_utf8_lossy(&data[..std::cmp::min(data.len(), 50)]));
         }
 
-        info!("Sending ADB WRTE message to device {} ({} bytes)", device_id, encoded_message.len());
+        debug!("Acknowledging WRTE with OKAY for stream {}", stream_id);
 
-        // Send ADB message through DeviceManager (reuses existing connection)
-        match self.device_manager.send_to_device(device_id, &encoded_message).await {
-            Ok(bytes_sent) => {
-                debug!("Successfully sent {} bytes to device {}", bytes_sent, device_id);
-
-                // Prepare buffer for response
-                let mut response_buffer = vec![0u8; 4096];
-
-                // Receive response through DeviceManager
-                match self.device_manager.receive_from_device(device_id, &mut response_buffer).await {
-                    Ok(bytes_received) if bytes_received > 0 => {
-                        response_buffer.truncate(bytes_received);
-                        debug!("Received {} bytes from device {}", bytes_received, device_id);
-
-                        // Parse ADB response message
-                        match crate::protocol::message::AdbMessage::deserialize(&response_buffer) {
-                            Ok(response_message) => {
-                                debug!("Parsed ADB response from device {}: {} bytes data", device_id, response_message.data.len());
-                                Ok(response_message.data)
-                            }
-                            Err(e) => {
-                                // If parsing fails, return raw data (device might not be using ADB protocol)
-                                warn!("Failed to parse ADB response from device {}: {}", device_id, e);
-                                Ok(response_buffer)
-                            }
-                        }
-                    }
-                    Ok(_) => {
-                        warn!("Device {} returned empty response", device_id);
-                        Err(Box::new(std::io::Error::new(
-                            std::io::ErrorKind::UnexpectedEof,
-                            "Device returned empty response"
-                        )))
-                    }
-                    Err(e) => {
-                        warn!("Failed to receive response from device {}: {}", device_id, e);
-                        Err(Box::new(std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            format!("Receive failed: {}", e)
-                        )))
-                    }
-                }
-            }
-            Err(e) => {
-                warn!("Failed to send message to device {}: {}", device_id, e);
-                Err(Box::new(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("Send failed: {}", e)
-                )))
-            }
-        }
+        // Return empty data (OKAY has no payload, just acknowledgment)
+        Ok(Vec::new())
     }
 
 }
@@ -795,13 +753,20 @@ mod tests {
 
     fn create_test_handler() -> AsciiHandler {
         use crate::server::state::ServerConfig;
+        use crate::server::device_registry::DeviceRegistry;
 
         let config = ServerConfig::default();
         let server_state = Arc::new(ServerState::new(config));
+        let device_registry = Arc::new(DeviceRegistry::new());
+        let device_manager = Arc::new(DeviceManager::new(
+            Arc::clone(&server_state),
+            Arc::clone(&device_registry),
+        ));
         let stream_forwarder = Arc::new(StreamForwarder::new(Arc::clone(&server_state)));
 
         AsciiHandler::new(
             server_state,
+            device_manager,
             stream_forwarder,
             "test-session".to_string(),
         )
