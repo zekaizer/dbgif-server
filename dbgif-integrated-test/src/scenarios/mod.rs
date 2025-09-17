@@ -1,9 +1,30 @@
 pub mod basic;
+pub mod connection;
+pub mod advanced;
+pub mod performance;
 
 use anyhow::Result;
 use async_trait::async_trait;
 
 pub use basic::{BasicConnectionScenario, HostServicesScenario, MultiDeviceScenario};
+pub use connection::{
+    ConnectionHandshakeScenario,
+    ErrorHandlingScenario,
+    StreamMultiplexingScenario,
+    TimeoutScenario,
+};
+pub use advanced::{
+    DeviceReconnectionScenario,
+    ConcurrentStreamScenario,
+    FailureRecoveryScenario,
+    CrossDeviceScenario,
+};
+pub use performance::{
+    ThroughputScenario,
+    LatencyScenario,
+    ConnectionLimitScenario,
+    MemoryLeakScenario,
+};
 
 pub struct ScenarioManager {
     scenarios: Vec<Box<dyn Scenario>>,
