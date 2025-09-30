@@ -1,7 +1,7 @@
 # dbgif Protocol Specification
 
 **Version:** 1.0.0
-**Last Updated:** 2025-01-17
+**Last Updated:** 2025-09-30
 
 ## Overview
 
@@ -29,153 +29,72 @@ The server acts as a protocol bridge:
 
 The Client-Server protocol uses a simple ASCII-based format similar to ADB's client protocol.
 
+### Protocol Overview
+
+The ASCII protocol supports two distinct message formats on the same connection:
+
+#### Message Format Summary
+
+| Purpose | Format | First 4 Bytes | Length Field | Max Size |
+|---------|--------|---------------|--------------|----------|
+| **Host Commands** | Length-first | Hex digits (`000c`, `001a`) | 4-byte hex | 64KB |
+| **Stream Data** | Type-first | `"STRM"` marker | 6-byte hex | 16MB |
+| **Responses** | Type-first | `"OKAY"` or `"FAIL"` | 4-byte hex | 64KB |
+
+#### Parser Disambiguation
+
+First 4 bytes determine message type: `"STRM"` for streams, `"OKAY"`/`"FAIL"` for responses, hex digits for commands. No collision possible.
+
+**Design Rationale:** Host commands use 4-byte length (64KB max, compact), streams use 6-byte length (16MB max, large transfers).
+
 ### Request Format
 
+#### Host Command Format
 ```
-[4-byte hex length][request-string]
+[4-byte hex length][command-string]
 ```
 
-- **Length**: 4-byte hexadecimal string representing the length of the request (e.g., "000c" for 12 bytes)
-- **Request**: ASCII string containing the command
+Examples: `"000chost:version"`, `"000ahost:list"`, `"0005shell:"`
 
-**Examples:**
-```
-"000chost:version"        # 12-byte request for version
-"000ahost:list"           # 10-byte request for device list
-"0005shell:"              # 5-byte request for shell service
-```
+**Note:** After service establishment, use Stream Message Format (see "Streaming Services").
 
 ### Response Format
-
-Responses use type-first pattern with length before data:
 
 ```
 Success: ["OKAY"][4-byte hex length][response-data]
 Failure: ["FAIL"][4-byte hex length][error-message]
 ```
 
-- **Status**: "OKAY" for success, "FAIL" for error (4 bytes, fixed position)
-- **Length**: Length of response data only (not including "OKAY"/"FAIL")
-- **Data**: Optional response data or error message
+Examples: `"OKAY0000"`, `"OKAY0010dbgif-server 1.0"`, `"FAIL0011device not found"`
 
-**Examples:**
-```
-"OKAY0000"                              # Success with no data
-"OKAY0010dbgif-server 1.0"              # Success with 16-byte data
-"FAIL0011device not found"              # Failure with 17-byte error message
-```
+**Stream Assignment:** Service requests return `"OKAY000201"` (length=0x0002, stream ID="01").
 
 ### Host Services
 
-Host services are handled directly by the server without device communication.
+Handled by server without device communication.
 
-#### host:version
-Returns the server version.
+| Command | Description | Response |
+|---------|-------------|----------|
+| `host:version` | Server version | `"OKAY"` + version string |
+| `host:list`, `host:devices` | List devices | `"OKAY"` + device list (TSV format) |
+| `host:transport:<id>` | Select device | `"OKAY0000"` or `"FAIL"` + error |
+| `host:connect:<ip>:<port>` | Connect to device (localhost only) | `"OKAY0000"` or `"FAIL"` + error |
+| `host:features` | Server capabilities | `"OKAY"` + features (one per line) |
 
-**Request:** `"000chost:version"`
-**Response:** `"OKAY"` + Length + version string
-
-**Example:**
-```
-C: "000chost:version"
-S: "OKAY0010dbgif-server 1.0"  # OKAY + 0x10 (16 decimal) byte version string
-```
-
-#### host:list / host:devices
-Lists all registered devices with their status.
-
-**Request:** `"000ahost:list"` or `"000dhost:devices"`
-**Response:** `"OKAY"` + Length + device list
-
-**Device List Format:**
-```
-<device_id>\t<status>\t<systemtype>\t<model>\t<version>\n
-```
-
-**Status Values:**
-- `device`: Device is connected and ready
-- `offline`: Device is registered but not connected
-- `authorizing`: Device is in authorization process (future)
-
-**Example:**
-```
-C: "000ahost:list"
-S: "OKAY0050tcp:custom001\toffline\ttizen\tMyBoard\tv1.2\nusb:device123\tdevice\tseret\tDevBoard\tv2.0\n"  # 0x50 (80 decimal) byte device list
-```
-
-#### host:transport:<device_id>
-Selects a target device for subsequent commands. All following non-host commands will be forwarded to this device.
-
-**Request:** `"001ahost:transport:tcp:custom001"`
-**Response:** `"OKAY"` + Length (success) or `"FAIL"` + Length + error
-
-**Example:**
-```
-C: "001ahost:transport:tcp:custom001"
-S: "OKAY0000"                           # Device selected, no data
-C: "0005shell:"                         # This will create a stream
-```
-
-#### host:connect:<ip>:<port>
-Connects directly to a device at the specified IPv4 address and port. This creates a dynamic connection without requiring pre-registration.
-
-**Security Restriction:** For security reasons, only localhost (127.0.0.1) connections are allowed.
-
-**Request:** `"0019host:connect:127.0.0.1:5557"`
-**Response:** `"OKAY"` + Length (success) or `"FAIL"` + Length + error
-
-**Example:**
-```
-C: "0019host:connect:127.0.0.1:5557"
-S: "OKAY0000"                           # Device registered, no data
-C: "0005shell:"                         # This will create a stream
-```
-
-**Error Cases:**
-- Invalid IP address: `"FAIL0011invalid address"`
-- Non-localhost IP: `"FAIL001donly localhost connections allowed"`
-- Registration failed: `"FAIL0013registration failed"`
-- Port out of range: `"FAIL000dinvalid port"`
-
-#### host:features
-Lists server capabilities and supported features.
-
-**Request:** `"000dhost:features"`
-**Response:** `"OKAY"` + Length + feature list (one per line)
-
-**Example:**
-```
-C: "000dhost:features"
-S: "OKAY0034lazy-connection\nmulti-client\nping-pong\ndirect-connect\n"  # 0x34 (52 decimal) byte feature list
-```
+**Device List Format:** `<device_id>\t<status>\t<systemtype>\t<model>\t<version>\n`
+**Status:** `device` (ready), `offline` (registered), `authorizing` (future)
 
 ### Local Services
 
-Local services are forwarded to the selected device after transport selection. Service requests automatically create streams,
-and the server responds with the assigned stream ID.
+Forwarded to device after `host:transport` selection. Returns assigned stream ID.
 
-**Important:** First select a device using `host:transport`, then request services directly.
+| Service | Description | Response |
+|---------|-------------|----------|
+| `shell[:cmd]` | Shell session/command | `"OKAY0002"` + stream ID |
+| `tcp:<port>` | TCP forwarding | `"OKAY0002"` + stream ID |
+| `sync:` | File sync | `"OKAY0002"` + stream ID |
 
-#### shell[:<command>]
-Opens a shell session or executes a command.
-
-**Request:** `"0005shell:"` or `"0011shell:ls -la"`
-**Response:** `"OKAY000201"` (stream ID "01" assigned)
-**Data Exchange:** Use STRM messages for commands and responses
-
-#### tcp:<port>
-Creates a TCP forwarding tunnel.
-
-**Request:** `"0008tcp:5555"`
-**Response:** `"OKAY000202"` (stream ID "02" assigned)
-**Data Exchange:** Use STRM messages for TCP data forwarding
-
-#### sync:
-Initiates file synchronization protocol.
-
-**Request:** `"0005sync:"`
-**Response:** `"OKAY000203"` (stream ID "03" assigned)
-**Data Exchange:** Use STRM messages for sync protocol messages
+All data exchange uses STRM messages (see below).
 
 ### Streaming Services (Multiplexed)
 
@@ -183,19 +102,45 @@ Services that require continuous data exchange use multiplexed streaming with ex
 
 #### Stream Message Format
 
+After a service is established (shell:, tcp:, sync:), all data exchange uses the Stream Message Format for multiplexing:
+
 ```
 ["STRM"][2-byte hex stream-id][6-byte hex length][data]
 ```
 
-- **"STRM"**: Stream data marker (4 bytes, fixed)
-- **Stream ID**: 2-byte hex stream identifier (e.g., "01", "FF")
-- **Length**: 6-byte hex for data length (supports up to 16MB)
+- **"STRM"**: Fixed 4-byte ASCII marker (distinguishes from host commands)
+- **Stream ID**: 2-byte hex identifier (00-FF, max 256 concurrent streams per session)
+- **Length**: 6-byte hex for data length (supports up to 16MB: 0xFFFFFF)
 - **Data**: Actual payload (can be empty for stream closure)
+
+**Design Note:** 
+- The 6-byte length field enables large file transfers (up to 16MB per message)
+- The fixed "STRM" marker prevents parsing ambiguity with host commands
+- Stream ID allows multiplexing multiple services on a single connection
+- **Full-duplex:** Streams support simultaneous bidirectional data flow (client and device can send/receive independently)
 
 **Special case:** Zero-length STRM closes the stream:
 ```
 "STRM01000000"  # Close stream 01 (no data)
 ```
+
+**Stream Closure Flows:**
+
+**Client-Initiated Closure:**
+1. Client → Server: `"STRM01000000"` (zero-length STRM)
+2. Server → Device: `CLSE(local_id, remote_id)` (close stream on device)
+3. Device → Server: `CLSE(remote_id, local_id)` (acknowledge closure)
+4. Server → Client: `"OKAY0000"` (confirm stream closed)
+
+The server removes the stream mapping only after receiving CLSE confirmation from the device.
+
+**Server-Initiated Closure (Device-driven):**
+1. Device → Server: `CLSE(local_id, remote_id)` (device closes stream)
+2. Server → Device: `CLSE(remote_id, local_id)` (acknowledge)
+3. Server → Client: `"STRM01000000"` (one-way notification, **no response expected**)
+
+When the client receives an unsolicited zero-length STRM, it indicates the device closed 
+the stream. The client should clean up local state without sending a response.
 
 #### Example: Shell Session
 
@@ -205,27 +150,32 @@ Services that require continuous data exchange use multiplexed streaming with ex
    S: "OKAY0000"                    # Transport selected
 
    C: "0005shell:"                  # Request shell service
-   S: "OKAY000201"                  # Stream 01 assigned
+   S: "OKAY000201"                  # Stream 01 assigned (length=0x0002, stream="01")
    ```
 
 2. **Multiplexed Data Exchange:**
    ```
-   C: "STRM0100000Als -la\n"       # Send 0x0A (10 decimal) bytes: "ls -la\n" on stream 01
-   S: "STRM01000035total 48\ndrwxr-xr-x 2 user user...\n"  # Response
+   C: "STRM0100000Als -la\n"       # 0x0A (10 decimal) bytes: "ls -la\n" on stream 01
+   S: "STRM01000035total 48\ndrwxr-xr-x 2 user user...\n"  # 0x35 (53 decimal) bytes response
 
-   C: "STRM01000005pwd\n"           # Send "pwd\n" on stream 01
-   S: "STRM0100000B/home/user\n"   # Response 0x0B (11 decimal) bytes: "/home/user\n"
+   C: "STRM01000005pwd\n"           # 0x05 (5 decimal) bytes: "pwd\n" on stream 01
+   S: "STRM0100000B/home/user\n"   # 0x0B (11 decimal) bytes: "/home/user\n"
    ```
 
 3. **Stream Termination:**
    ```
-   C: "STRM01000000"                # Close stream 01 (zero-length)
-   S: "OKAY0000"                    # Stream closed
+   C: "STRM01000000"                # Close stream 01 (zero-length STRM)
+   
+   # Server-Device binary protocol
+   S→D: CLSE(local_id=501, remote_id=100)
+   D→S: CLSE(local_id=100, remote_id=501)
+   
+   S: "OKAY0000"                    # Stream closed confirmation to client
    ```
 
 #### Multiple Concurrent Streams
 
-The multiplexed format allows multiple services to run simultaneously:
+The multiplexed format allows multiple services to run simultaneously. Each stream operates independently with full-duplex communication:
 
 ```
 C: "0005shell:"                     # Request shell service
@@ -235,130 +185,45 @@ C: "0008tcp:8080"                   # Request TCP forward
 S: "OKAY000202"                     # Stream 02 assigned
 
 C: "STRM0100000Als -la\n"           # 0x0A (10 decimal) bytes shell command on stream 01
-C: "STRM02000012GET / HTTP/1.1\r\n" # HTTP request on stream 02
+C: "STRM02000012GET / HTTP/1.1\r\n" # 0x12 (18 decimal) bytes HTTP request on stream 02
 
-S: "STRM01000035total 48\n..."      # Shell response on stream 01
-S: "STRM02000026HTTP/1.1 200 OK..." # HTTP response on stream 02
+S: "STRM01000035total 48\n..."      # 0x35 (53 decimal) bytes shell response on stream 01
+S: "STRM02000026HTTP/1.1 200 OK..." # 0x26 (38 decimal) bytes HTTP response on stream 02
 ```
-
-**Benefits:**
-- Clear stream boundaries and identification
-- Support for concurrent operations
-- Consistent message format
-- Easy to parse and debug
-- No ambiguity about which stream data belongs to
 
 ## Server-Device Protocol (Binary)
 
-The Server-Device protocol uses a binary format with 24-byte headers for efficiency.
+24-byte header + variable data, little-endian, ADB-like structure.
 
 ### Message Format
-
-All messages follow the ADB packet structure:
-
 ```
-struct Message {
-    command: u32,     // Command code (little-endian)
-    arg0: u32,        // First argument (little-endian)
-    arg1: u32,        // Second argument (little-endian)
-    data_length: u32, // Length of data payload (little-endian)
-    data_crc32: u32,  // CRC32 of data payload (little-endian)
-    magic: u32,       // Magic number (~command, bitwise NOT)
-    data: [u8],       // Variable length data payload
-}
+command(u32) | arg0(u32) | arg1(u32) | data_length(u32) | data_crc32(u32) | magic(u32) | data
 ```
 
-Total header size: 24 bytes
+**Field Descriptions:**
+- **command**: Command identifier (4 bytes, little-endian, e.g., 0x4E584E43 for CNXN)
+- **arg0**: First argument (4 bytes, command-specific, e.g., local stream ID)
+- **arg1**: Second argument (4 bytes, command-specific, e.g., remote stream ID)
+- **data_length**: Payload length in bytes (4 bytes, little-endian)
+- **data_crc32**: CRC32 checksum of payload (4 bytes, little-endian, 0 if no data)
+- **magic**: Validation field (4 bytes, bitwise NOT of command, e.g., ~0x4E584E43)
+- **data**: Variable-length payload (0 to data_length bytes)
 
 ### Commands
 
-#### CNXN (0x4E584E43)
-Connection establishment between server and device.
+| Command | Code | Arguments | Data | Response |
+|---------|------|-----------|------|----------|
+| **CNXN** | 0x4E584E43 | version, maxlen | `systemtype:serial:banner` | CNXN |
+| **OPEN** | 0x4E45504F | local_id, 0 | service name | OKAY/CLSE |
+| **OKAY** | 0x59414B4F | local_id, remote_id | none | - |
+| **WRTE** | 0x45545257 | local_id, remote_id | payload | OKAY |
+| **CLSE** | 0x45534C43 | local_id, remote_id | none | CLSE (swapped IDs) |
+| **PING** | 0x474E4950 | connect_id, token | none | PONG |
+| **PONG** | 0x474E4F50 | connect_id, token | none | - |
 
-**Arguments:**
-- arg0: Protocol version (0x01000000)
-- arg1: Maximum message length
-
-**Data:** System identifier string
-
-**Response:** CNXN with device information
-
-**CNXN Data Format:**
-```
-<systemtype>:<device_serialno>:<banner>
-```
-
-**Example:**
-```
-tizen:custom001:ro.product.model=MyBoard;ro.build.version=v1.2;ro.connect.id=0x12345678;
-```
-
-**Note:** The device includes its unique `ro.connect.id` in the banner during the
-CNXN handshake. This ID will be used for all PING/PONG health checks.
-
-#### OPEN (0x4E45504F)
-Open a new stream for communication.
-
-**Arguments:**
-- arg0: Local stream ID
-- arg1: 0 (remote stream ID unknown at this point)
-
-**Data:** Service name (e.g., "shell:", "tcp:8080")
-
-**Response:** OKAY (success) or CLSE (failure)
-
-#### OKAY (0x59414B4F)
-Success acknowledgment.
-
-**Arguments:**
-- arg0: Local stream ID (responder's own stream ID)
-- arg1: Remote stream ID (original sender's stream ID from OPEN)
-
-**Data:** None
-
-#### WRTE (0x45545257)
-Write data to an open stream.
-
-**Arguments:**
-- arg0: Local stream ID
-- arg1: Remote stream ID
-
-**Data:** Payload to write
-
-**Response:** OKAY (acknowledgment)
-
-#### CLSE (0x45534C43)
-Close an open stream.
-
-**Arguments:**
-- arg0: Local stream ID
-- arg1: Remote stream ID
-
-**Data:** None
-
-#### PING (0x474E4950)
-Ping request to test connection.
-
-**Arguments:**
-- arg0: Connect ID (from device's ro.connect.id in CNXN banner)
-- arg1: Random token for this ping
-
-**Data:** None
-
-**Response:** PONG with same connect ID and token
-
-**Note:** The connect_id is provided by the device during the second CNXN message
-in the banner field (e.g., ro.connect.id=0x12345678). The device uses this ID
-for all subsequent PING messages to identify itself.
-
-#### PONG (0x474E4F50)
-Ping response.
-
-**Arguments:**
-- arg0: Connect ID (from PING)
-- arg1: Random token (from PING)
-
-**Data:** None
+**Notes:**
+- **CNXN banner** includes `ro.connect.id` for PING/PONG identification
+- **CLSE** is bidirectional (either side can initiate)
 
 ## Protocol Bridge Flow
 
@@ -391,7 +256,7 @@ The server bridges between ASCII and binary protocols:
 5. **Data exchange using STRM format:**
    ```
    # Client sends command
-   C→S: "STRM01000003ls\n"                  # STRM + stream 01 + 3 bytes + "ls\n"
+   C→S: "STRM01000003ls\n"                  # STRM + stream 01 + 0x03 (3 decimal) bytes
 
    # Server forwards to device
    S→D: WRTE(local_id=501, remote_id=100, data="ls\n")
@@ -402,7 +267,7 @@ The server bridges between ASCII and binary protocols:
    S→D: OKAY(local_id=501, remote_id=100)
 
    # Server forwards to client
-   S→C: "STRM0100000Efile1\nfile2\n"        # STRM + stream 01 + 0x0E (14 decimal) bytes + output
+   S→C: "STRM0100000Efile1\nfile2\n"        # STRM + stream 01 + 0x0E (14 decimal) bytes
    ```
 
 6. **Stream closure:**
@@ -413,267 +278,69 @@ The server bridges between ASCII and binary protocols:
    S→C: "OKAY0000"                          # Stream closed
    ```
 
-### Example: Device List
-
-1. **Client requests device list (ASCII):**
-   ```
-   C→S: "000ahost:list"
-   ```
-
-2. **Server processes internally (no device communication):**
-   ```
-   Server checks internal device registry
-   ```
-
-3. **Server responds (ASCII):**
-   ```
-   S→C: "OKAY0028tcp:dev1\tdevice\ttizen\tBoard\tv1.0\n"  # OKAY + 0x28 (40 decimal) byte device list
-   ```
-
 ## Device Discovery and Registration
 
-Devices are discovered through transport layer mechanisms:
+**Transport Discovery:**
+- **TCP**: Devices advertise on network ports, registered as "offline"
+- **USB**: Server enumerates devices, extracts serial numbers
 
-### TCP Transport Discovery
-- Devices advertise on configured network ports
-- Server detects and registers as "offline"
-- Connection established on-demand when client selects device
+**States:** `offline` (discovered), `device` (connected), `authorizing` (future)
 
-### USB Transport Discovery
-- Server enumerates USB devices
-- Compatible devices registered as "offline"
-- Serial numbers extracted from USB descriptors
-
-### Registration States
-- **offline**: Device discovered but not connected
-- **device**: Device connected and ready
-- **authorizing**: Device pending authorization (future)
+**Lazy Connection:** Actual connection established on-demand when client requests service.
 
 ## Connection Management
 
-### Client-Server Connection Flow
+### Client-Server Connection
+- Port 5555 (default), no handshake, stateless ASCII protocol
+- `host:transport:<id>` selects device (stateful per session)
+- Device switching: new streams to new device, existing streams remain active until closed
 
-Unlike the binary protocol, client-server uses a stateless ASCII protocol:
+### Server-Device Connection (Lazy)
 
-1. **TCP Connection:**
-   - Client connects to server on port 5037 (default)
-   - No handshake required (stateless protocol)
-   - Connection persists for session duration
+**CNXN Handshake (3-way):**
+1. Server → Device: `CNXN("RESET")`
+2. Device → Server: `CNXN("systemtype:serial:banner ro.connect.id=0x...")` 
+3. Server → Device: `CNXN("host::ready")`
 
-2. **Command Processing:**
-   ```
-   Client                    Server
-     |                         |
-     |--TCP Connect:5037------>|
-     |                         |
-     |--"000chost:version"---->|
-     |<--"OKAY00051.0.0"------| # OKAY + 0x05 (5 decimal) byte version
-     |                         |
-     |--"000ahost:list"------->|
-     |<--"OKAY002c..."---------|  # OKAY + device list
-     |                         |
-   ```
+**Health Check:** PING/PONG every 1s (3s timeout → mark offline)
 
-3. **Transport Selection (Stateful):**
-   ```
-   C: "001ahost:transport:tcp:device001"
-   S: "OKAY0000"
-   # Server now routes all non-host commands to device001
-   ```
+### Stream Flow (Three-Way Mapping)
 
-### Server-Device Connection Flow (Lazy)
+**Stream Lifecycle:**
+1. Client → Server: `"shell:"` (ASCII)
+2. Server maps: client_01 ↔ server_501 ↔ device_100
+3. Server → Device: `OPEN(501, 0, "shell:")` (binary)
+4. Device → Server: `OKAY(100, 501)` (binary)
+5. Server → Client: `"OKAY000201"` (ASCII, stream assigned)
 
-The server uses lazy connection with binary protocol:
+**Data Exchange (Full-Duplex):**
+- Client STRM → Server WRTE → Device (translate ASCII→binary)
+- Device WRTE → Server STRM → Client (translate binary→ASCII)
+- Both directions operate independently without blocking each other
 
-1. **Device Discovery Phase:**
-   ```
-   Device                    Server
-     |                         |
-     |  (Advertises on 5557)   |
-     |<--Server discovers-------|
-     |                         |
-     |  Status: "offline"      |
-     |  No active connection   |
-   ```
-
-2. **On-Demand Connection (First Stream Request):**
-   ```
-   Client → Server: "001ahost:transport:tcp:device001"
-   Server: Mark device001 as selected for this client
-   Client → Server: "0005shell:"  # Request shell service
-
-   Server → Device: [Connect via transport]
-   Server → Device: CNXN(version=0x01000000, maxdata=256K, "RESET\x00")
-   Device → Server: CNXN(version=0x01000000, maxdata=256K, "tizen:device001:banner ro.product.model=MyBoard;ro.build.version=v1.0;ro.connect.id=0x12345678;")
-   Server → Device: CNXN(version=0x01000000, maxdata=256K, "host::ready")
-
-   Server: Update device status to "device"
-   Server → Device: OPEN(local_id=1, remote_id=0, "shell:")
-   Device → Server: OKAY(local_id=100, remote_id=1)
-
-   Server → Client: "OKAY000201"  # Stream 01 assigned
-   ```
-
-3. **Connection Maintenance:**
-   ```
-   Every 1 second:
-   Device → Server: PING(connect_id=0x12345678, token=random)
-   Server → Device: PONG(connect_id=0x12345678, token=same)
-
-   If no PONG within 3 seconds:
-   Device: Close connection, retry
-   Server: Mark device as "offline"
-   ```
-
-### Three-Way Stream Flow
-
-Complete flow from client through server to device:
-
-1. **Stream Establishment:**
-   ```
-   # Client has already selected device via host:transport
-
-   Client → Server: "0005shell:"          # Request shell service
-
-   Server internal:
-   - Allocate server-side stream ID (e.g., 501)
-   - Map client_stream_01 ↔ server_stream_501
-
-   Server → Device: OPEN(local_id=501, remote_id=0, "shell:")
-   Device → Server: OKAY(local_id=100, remote_id=501)
-
-   Server internal:
-   - Map server_stream_501 ↔ device_stream_100
-   - Complete mapping: client_01 ↔ server_501 ↔ device_100
-
-   Server → Client: "OKAY000201"                # Stream 01 assigned
-   ```
-
-2. **Data Transfer:**
-   ```
-   # Write from client
-   Client → Server: "STRM0100000Cls -la\n"      # STRM format
-
-   Server internal:
-   - Lookup: client_01 → server_501 → device_100
-
-   Server → Device: WRTE(local_id=501, remote_id=100, "ls -la\n")
-   Device → Server: OKAY(local_id=100, remote_id=501)
-
-   # Response from device
-   Device → Server: WRTE(local_id=100, remote_id=501, "total 48\n...")
-   Server → Device: OKAY(local_id=501, remote_id=100)
-
-   Server internal:
-   - Lookup: device_100 → server_501 → client_01
-
-   Server → Client: "STRM01000035total 48\n..." # STRM format  # 0x35 (53 decimal) bytes
-   ```
-
-3. **Stream Closure:**
-   ```
-   Client → Server: "STRM01000000"  # Zero-length STRM closes stream
-
-   Server → Device: CLSE(local_id=501, remote_id=100)
-   Device → Server: CLSE(local_id=100, remote_id=501)
-
-   Server internal:
-   - Remove mapping for client_01 ↔ server_501 ↔ device_100
-
-   Server → Client: "OKAY0000"
-   ```
+**Closure:**
+- **Client-initiated:** `STRM00...00` → CLSE handshake → `OKAY0000`
+- **Device-initiated:** CLSE handshake → `STRM00...00` (one-way, no client response)
 
 ### Multi-Client Multiplexing
 
-Multiple clients can connect to the same device:
-
-```
-Client A                Server              Device
-   |                      |                   |
-   |--host:transport----->|                   |
-   |--"0005shell:"------->|--OPEN(501)------->|
-   |                      |<--OKAY(100,501)---|
-   |<--"OKAY000201"--------|                   |
-                          |
-Client B                  |
-   |                      |                   |
-   |--host:transport----->|                   |
-   |--"0005shell:"------->|--OPEN(502)------->|
-   |                      |<--OKAY(101,502)---|
-   |<--"OKAY000201"--------|                   |
-
-Stream Mapping:
-- ClientA:01 ↔ Server:501 ↔ Device:100
-- ClientB:01 ↔ Server:502 ↔ Device:101
-```
-
-### Connection State Management
-
-**Client Session State:**
-- Selected device (via host:transport)
-- Active streams (00-FF, max 256)
-- Connection socket
-
-**Device Connection State:**
-- Connection status (offline/device)
-- Active streams with all clients
-- Last ping timestamp
-- Device properties (from CNXN)
-
-**Stream Mapping Table:**
-```
-| Client | C.Stream | S.Stream | Device | D.Stream |
-|--------|----------|----------|--------|----------|
-| A      | 01       | 501      | dev001 | 100      |
-| A      | 02       | 502      | dev001 | 101      |
-| B      | 01       | 503      | dev001 | 102      |
-| B      | 02       | 504      | dev002 | 100      |
-```
+Multiple clients to same device: Server maintains separate stream mappings per client.
+Example: ClientA:01→Server:501→Device:100, ClientB:01→Server:502→Device:101
 
 ## Error Handling
 
-### Client-Server Errors
-- Invalid command format: `"FAIL"` + Length + error message
-- Device not found: `"FAIL0011device not found"`
-- Service unavailable: `"FAIL0013service unavailable"`
+**Client-Server:** `"FAIL"` + length + error message
+**Server-Device:** Connection termination (invalid/CRC), CLSE on stream errors
+**Closure Errors:** Unexpected closure (device crash) → `STRM00...00` to client, timeout (5s) → force close, non-existent stream → idempotent CLSE
 
-### Server-Device Errors
-- Connection failure: Device marked "offline"
-- Invalid message: Connection terminated
-- CRC32 mismatch: Message discarded
-- Stream errors: CLSE sent to both endpoints
+**Recovery:** Client reconnect requires reselect device, device reconnect invalidates streams
 
-### Recovery
-- Client reconnection: New session, must reselect device
-- Device reconnection: Existing streams invalidated
-- Partial writes: Stream must be closed and reopened
+## Performance & Limits
 
-## Performance Considerations
-
-### Optimizations
-- Lazy device connections (connect on-demand)
-- Stream multiplexing for concurrent operations
-- Connection pooling for multiple clients
-- Efficient binary protocol for device communication
-
-### Limits
-- Maximum request size: 64KB (4-byte hex = FFFF)
-- Maximum STRM data size: 16MB (6-byte hex = FFFFFF)
-- Stream IDs per session: 256 (00-FF in 2-byte hex)
-- Concurrent clients: 100 (default)
-- Device connections: 16 (default)
+**Optimizations:** Lazy connection, stream multiplexing, connection pooling
+**Limits:** Request 64KB, STRM 16MB, Streams 256/session, Clients 100, Devices 16 (defaults)
 
 ## Quick Reference
-
-### Message Formats Summary
-
-| Type | Format | Example |
-|------|--------|---------|
-| **Request** | `[4-byte hex length][command]` | `"000chost:version"` |
-| **Response (OK)** | `"OKAY"[4-byte hex length][data]` | `"OKAY0010server 1.0"` |
-| **Response (Fail)** | `"FAIL"[4-byte hex length][error]` | `"FAIL0005error"` |
-| **Stream Data** | `"STRM"[2-byte id][6-byte length][data]` | `"STRM01000003ls\n"` |
-| **Stream Close** | `"STRM"[2-byte id]"000000"` | `"STRM01000000"` |
 
 ### Common Commands
 
@@ -688,22 +355,15 @@ Stream Mapping:
 | `tcp:<port>` | TCP port forward | `"OKAY0002"` + stream ID |
 | `sync:` | File sync | `"OKAY0002"` + stream ID |
 
+### Stream Closure Summary
+
+| Initiator | Client Sends | Server Responds | Notes |
+|-----------|--------------|-----------------|-------|
+| **Client** | `"STRM<id>000000"` | `"OKAY0000"` | Client closes stream |
+| **Device** | N/A (receives) | `"STRM<id>000000"` | Server notifies client (no response expected) |
+
 ## Differences from Standard ADB
 
-### Added Features
-- PING/PONG for connection health monitoring
-- Lazy connection establishment
-- Simplified device discovery
-- CRC32 validation on all messages
-
-### Removed Features
-- AUTH command (no authentication yet)
-- SYNC.TXT protocol (simplified file transfer)
-- USB protocol details (abstracted)
-- Encryption support (not implemented)
-
-### Protocol Differences
-- Dual-protocol architecture (ASCII + Binary)
-- Simplified host service protocol
-- Direct ASCII responses (no A_WRTE wrapping)
-- No authentication requirement
+**Added:** PING/PONG, lazy connection, dual-protocol (ASCII+Binary)
+**Removed:** AUTH, SYNC.TXT, encryption
+**Different:** Simplified host services, direct ASCII responses (no A_WRTE wrapping)
